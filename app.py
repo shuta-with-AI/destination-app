@@ -182,10 +182,10 @@ def estimate_arrival(distance_km, avg_speed_kmh=30):
     return datetime.datetime.now() + datetime.timedelta(hours=hours)
 
 def navi_url(name):
-    return f"https://www.google.com/maps/dir/?api=1&destination={urllib.parse.quote(name)}&travelmode=driving"
+    return f"[https://www.google.com/maps/dir/?api=1&destination=](https://www.google.com/maps/dir/?api=1&destination=){urllib.parse.quote(name)}&travelmode=driving"
 
 # ------------------------------------------------------------
-# メイン処理（Google Places APIの代わりにGemini APIを使用）
+# メイン処理（Gemini APIで候補店舗を出力）
 # ------------------------------------------------------------
 def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     if not GEMINI_API_KEY:
@@ -194,10 +194,18 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     keyword = PURPOSE_KEYWORDS.get(purpose, purpose)
     
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # 強制的にJSON形式でレスポンスを返させる設定
+        generation_config = genai.GenerationConfig(
+            response_mime_type="application/json"
+        )
+        model = genai.GenerativeModel(
+            'gemini-1.5-flash',
+            generation_config=generation_config
+        )
+        
         prompt = f"""
-        あなたは優秀なドライブ先提案アシスタントです。
-        以下の条件に合致する実在のドライブ目的地を10件提案してください。
+        あなたはドライブ先提案アシスタントです。
+        以下の条件に合致する実在のドライブ目的地を必ず10件提案してください。
 
         【条件】
         - 現在地情報: {location_str}
@@ -206,7 +214,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         - 予算感: {budget_filter}
         - 最低評価: {min_rating}以上
 
-        必ず以下のJSON配列形式のみを出力してください（Markdownの```記法や前置きは不要です）。
+        以下のJSON構造の配列のみを出力してください。
         [
           {{
             "name": "店舗/施設名",
@@ -220,33 +228,26 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         """
         
         response = model.generate_content(prompt)
-        text = response.text.strip()
-        
-        # --- ここからデバッグ用（AIの生の返答を確認） ---
-        if not text:
-            st.error("Gemini APIから空の返答が返ってきました。APIキーを確認してください。")
-            return []
-            
-        if text.startswith("```json"):
-            text = text[7:-3].strip()
-        elif text.startswith("```"):
-            text = text[3:-3].strip()
-            
-        raw_results = json.loads(text)
+        raw_results = json.loads(response.text)
         
     except Exception as e:
-        st.error(f"詳細エラー情報: {e}")
+        st.error(f"Gemini API通信・解析エラー: {e}")
         return []
 
     candidates = []
     for place in raw_results:
         name = place.get("name", "不明な店舗")
         place_id = hashlib.md5(name.encode()).hexdigest()
-        rating = float(place.get("rating", 3.0))
-        review_count = int(place.get("review_count", 100))
         
-        if rating < min_rating:
-            continue
+        try:
+            rating = float(place.get("rating", 4.0))
+        except (ValueError, TypeError):
+            rating = 4.0
+            
+        try:
+            review_count = int(place.get("review_count", 100))
+        except (ValueError, TypeError):
+            review_count = 100
 
         save_snapshot(place_id, name, review_count, rating)
         buzz_rate = get_buzz_rate(place_id, review_count)

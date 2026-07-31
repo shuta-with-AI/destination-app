@@ -18,6 +18,7 @@ import math
 import json
 import hashlib
 import urllib.parse
+import traceback
 from google import genai
 from google.genai import types
 import google.genai
@@ -202,8 +203,6 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
             )
         )
         raw_results = json.loads(response.text)
-        
-    import traceback
 
     except Exception as e:
         st.error(type(e))

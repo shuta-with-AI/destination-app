@@ -624,7 +624,7 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
                     p.get("id"),
 
                 "name":
-                    name,
+                    name_check,
 
                 "address":
                     p.get(
@@ -684,10 +684,7 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
 
         return []
 
-    except Exception as e:
-        st.error(f"通信エラーが発生しました: {str(e)}")
-        return []
-
+    
 # ------------------------------------------------------------
 # メイン検索処理
 # ------------------------------------------------------------
@@ -738,7 +735,6 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
 
     if not open_places:
         return []
-        st.write(p["name"], open_status, p["regular_opening_hours"])
 
     filtered_places = [p for p in open_places if p["rating"] >= min_rating]
     if len(filtered_places) < 10:
@@ -828,7 +824,7 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
         if not menu_list:
             menu_list = ["定番おすすめメニュー", "人気商品"]
 
-        place_id = hashlib.md5(name.encode()).hexdigest()
+        place_id = base_info.get("google_id") or hashlib.md5(name.encode()).hexdigest()
         save_snapshot(place_id, name, review_count, rating)
         buzz_rate = get_buzz_rate(place_id, review_count)
         fallback_score = round(rating + math.log10(review_count + 1), 3)

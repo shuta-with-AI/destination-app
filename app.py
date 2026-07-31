@@ -241,7 +241,7 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
         if (open_minutes <= arrival_minutes < close_minutes) or (open_minutes <= (arrival_minutes + 7 * 24 * 60) < close_minutes):
             c_hour, c_min = close_info.get("hour", 0), close_info.get("minute", 0)
             close_time_obj = datetime.time(c_hour, c_min)
-            close_dt = datetime.datetime.combine(arrival_dt.date(), close_time_obj)
+            close_dt = datetime.datetime.combine(arrival_dt.date(), close_time_obj, tzinfo=arrival_dt.tzinfo)
             lo_dt = close_dt - datetime.timedelta(minutes=30)
             
             # 到着時刻がラストオーダー目安を過ぎていないかも判定

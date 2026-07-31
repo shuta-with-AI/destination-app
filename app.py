@@ -391,7 +391,7 @@ def search_places_google(location_str, radius_km, search_query_keyword):
     if lat is not None and lng is not None:
         safe_radius = min(float(radius_km * 1000), 50000.0)  # 最大50km制限
         # 🌟 locationRestriction を使って指定範囲外の遠方店舗（群馬など）を完全に遮断
-        body["locationBias"] = {
+        body["locationRestriction"] = {
             "circle": {
                 "center": {"latitude": lat, "longitude": lng},
                 "radius": safe_radius
@@ -412,6 +412,7 @@ def search_places_google(location_str, radius_km, search_query_keyword):
         places = []
         for p in raw_places:
             
+            """
             # 半径外の店舗を除外
             if lat is not None and lng is not None:
                 loc = p.get("location", {})
@@ -422,6 +423,7 @@ def search_places_google(location_str, radius_km, search_query_keyword):
                     distance = haversine(lat, lng, plat, plng)
                     if distance > radius_km:
                         continue
+            """
 
             name = p.get("displayName", {}).get("text", "")
             rating = float(p.get("rating", 0.0))

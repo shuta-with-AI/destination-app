@@ -4,7 +4,7 @@
 ====================
 現在地・ドライブ圏内・目的を入力すると、
 1. Gemini API で自由入力ワードをGoogle検索に最適化された類似キーワード群へ拡張
-2. 現在地から緯度経度を特定し、locationRestriction（完全境界制限）でエリア外の店舗を完全遮断
+2. 現在地から緯度経度を特定し、エリア内の店舗を取得
 3. Google Places API (New) で指定エリアの店舗および最新口コミ・写真（最大2枚）を取得
 4. Google Distance Matrix API で現在地から各店舗への正確な車移動時間を計算
 5. 到着予定時刻に基づき、閉店時間・ラストオーダー目安を算出
@@ -233,27 +233,6 @@ def geocode_location(location_str):
 
     return None, None
 
-
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371.0
-
-    lat1 = math.radians(lat1)
-    lon1 = math.radians(lon1)
-    lat2 = math.radians(lat2)
-    lon2 = math.radians(lon2)
-
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(lat1) * math.cos(lat2)
-        * math.sin(dlon / 2) ** 2
-    )
-
-    return 2 * R * math.asin(math.sqrt(a))
-
-
 # ------------------------------------------------------------
 # Google Distance Matrix API 連携
 # ------------------------------------------------------------
@@ -355,81 +334,19 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
     return False, "営業時間外", "営業時間外"
 
 # ------------------------------------------------------------
-# Google Places API 検索 (エリア外店舗を絶対遮断)
+# Google Places API 検索
 # ------------------------------------------------------------
-def search_places_google(location_str, radius_km, search_query_keyword, selected_keywords):
-
-    keyword_text = search_query_keyword
-
+def search_places_google(location_str, radius_km, search_query_keyword):
     if not GOOGLE_MAPS_API_KEY:
         st.error("GOOGLE_MAPS_API_KEY が未設定です。")
         return []
 
-    # -----------------------------
-    # 位置情報取得
-    # -----------------------------
     lat, lng = geocode_location(location_str)
-
     if lat is None or lng is None:
         st.error("現在地の取得に失敗しました")
         return []
 
-
-    # -----------------------------
-    # 検索タイプ決定
-    # -----------------------------
-    included_types = set()
-    
-    if any(word in keyword_text for word in [
-        "ラーメン",
-        "焼肉",
-        "ハンバーガー",
-        "定食",
-        "和食",
-        "レストラン"
-    ]):
-        included_types.update([
-            "restaurant"
-        ])
-
-    elif any(word in keyword_text for word in [
-        "カフェ",
-        "パン",
-        "ケーキ",
-        "アイス",
-        "クレープ",
-        "スイーツ"
-    ]):
-        included_types.update([
-            "cafe",
-            "bakery",
-            "ice_cream_shop"
-        ])
-
-    elif any(word in keyword_text for word in [
-        "夜景",
-        "海",
-        "公園",
-        "自然",
-        "観光",
-        "展望"
-    ]):
-        included_types.update([
-            "tourist_attraction",
-            "park",
-        ])
-
-    else:
-        included_types.update([
-            "restaurant",
-            "cafe",
-        ])
-
-    included_types = list(included_types)
-
-
     url = "https://places.googleapis.com/v1/places:searchNearby"
-
 
     headers = {
         "Content-Type": "application/json",
@@ -449,147 +366,46 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
         ),
     }
 
-
+    # フィルタリングを厳しくしすぎず、広範に取得できるように設定
     body = {
-
-        "includedTypes": included_types,
-
         "maxResultCount": 20,
-
         "locationRestriction": {
-
             "circle": {
-
                 "center": {
                     "latitude": lat,
                     "longitude": lng
                 },
-
-                "radius": min(
-                    radius_km * 1000,
-                    50000
-                )
+                "radius": min(radius_km * 1000, 50000)
             }
         }
     }
 
-
     try:
-
-        r = requests.post(
-            url,
-            headers=headers,
-            json=body,
-            timeout=10
-        )
-
-
+        r = requests.post(url, headers=headers, json=body, timeout=10)
         if r.status_code != 200:
-            st.error(
-                f"Google API エラー {r.status_code}\n{r.text}"
-            )
+            st.error(f"Google API エラー {r.status_code}\n{r.text}")
             return []
 
-
         data = r.json()
-
-        raw_places = data.get(
-            "places",
-            []
-        )
-
-
-        st.caption(
-            f"Nearby Search取得件数: {len(raw_places)}"
-        )
-
+        raw_places = data.get("places", [])
+        st.caption(f"Nearby Search取得件数: {len(raw_places)}")
 
         places = []
-
-
         for p in raw_places:
+            name_check = p.get("displayName", {}).get("text", "")
 
-
-            name_check = p.get(
-                "displayName",
-                {}
-            ).get(
-                "text",
-                ""
-            )
-
-            """
-            if "ラーメン" in keyword_text:
-                
-                if not any(x in name_check for x in [
-                    "ラーメン",
-                    "麺",
-                    "中華"
-                ]):
-                    continue
-
-            if any(x in keyword_text for x in [
-                "スイーツ",
-                "アイス",
-                "ケーキ",
-                "クレープ"
-            ]):
-                if not any(x in name_check for x in [
-                    "カフェ",
-                    "ケーキ",
-                    "菓子",
-                    "スイーツ",
-                    "ジェラート",
-                    "アイス",
-                    "クレープ",
-                    "パン",
-                    "ベーカリー"
-                ]):
-                    continue
-
-            """
-
-            if any(x in name_check.lower() for x in [
-                "ホテル",
-                "hotel",
-                "旅館",
-                "宿"
-            ]):
+            # ホテル・宿などの除外
+            if any(x in name_check.lower() for x in ["ホテル", "hotel", "旅館", "宿"]):
                 continue
 
+            rating = float(p.get("rating", 0))
+            review_count = int(p.get("userRatingCount", 0))
 
-            rating = float(
-                p.get(
-                    "rating",
-                    0
-                )
-            )
-
-
-            review_count = int(
-                p.get(
-                    "userRatingCount",
-                    0
-                )
-            )
-
-
-            # -----------------------------
             # 写真取得
-            # -----------------------------
             photo_urls = []
-
-            for photo in p.get(
-                "photos",
-                []
-            )[:2]:
-
-                photo_name = photo.get(
-                    "name"
-                )
-
+            for photo in p.get("photos", [])[:2]:
+                photo_name = photo.get("name")
                 if photo_name:
-
                     photo_urls.append(
                         f"https://places.googleapis.com/v1/{photo_name}/media"
                         f"?key={GOOGLE_MAPS_API_KEY}"
@@ -597,103 +413,34 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
                         "&maxWidthPx=400"
                     )
 
-
-            # -----------------------------
             # 口コミ取得
-            # -----------------------------
             review_texts = []
-
-            for rev in p.get(
-                "reviews",
-                []
-            )[:5]:
-
-                txt = rev.get(
-                    "text",
-                    {}
-                ).get(
-                    "text",
-                    ""
-                )
-
+            for rev in p.get("reviews", [])[:5]:
+                txt = rev.get("text", {}).get("text", "")
                 if txt:
-
-                    review_texts.append(
-                        txt.replace(
-                            "\n",
-                            " "
-                        )
-                    )
-
+                    review_texts.append(txt.replace("\n", " "))
 
             places.append({
-
-                "google_id":
-                    p.get("id"),
-
-                "name":
-                    name_check,
-
-                "address":
-                    p.get(
-                        "formattedAddress",
-                        ""
-                    ),
-
-                "rating":
-                    rating,
-
-                "review_count":
-                    review_count,
-
-                "maps_url":
-                    p.get(
-                        "googleMapsUri",
-                        ""
-                    ),
-
-                "regular_opening_hours":
-                    p.get(
-                        "regularOpeningHours"
-                    ),
-
-                "open_now_fallback":
-                    p.get(
-                        "currentOpeningHours",
-                        {}
-                    ).get(
-                        "openNow"
-                    ),
-
-                "location":
-                    p.get(
-                        "location"
-                    ),
-
-                "photo_urls":
-                    photo_urls,
-
-                "review_texts":
-                    " / ".join(
-                        review_texts
-                    )
-
+                "google_id": p.get("id"),
+                "name": name_check,
+                "address": p.get("formattedAddress", ""),
+                "rating": rating,
+                "review_count": review_count,
+                "maps_url": p.get("googleMapsUri", ""),
+                "regular_opening_hours": p.get("regularOpeningHours"),
+                "open_now_fallback": p.get("currentOpeningHours", {}).get("openNow"),
+                "location": p.get("location"),
+                "photo_urls": photo_urls,
+                "review_texts": " / ".join(review_texts)
             })
 
         st.caption(f"店名/ホテル除外フィルタ後: {len(places)}")
-
         return places
 
-
     except Exception as e:
-
-        st.error(
-            f"通信エラー: {e}"
-        )
-
+        st.error(f"通信エラー: {e}")
         return []
 
-    
 # ------------------------------------------------------------
 # メイン検索処理
 # ------------------------------------------------------------
@@ -704,13 +451,7 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
 
     now = datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
 
-    raw_places = search_places_google(
-        location_str,
-        radius_km,
-        search_query_keyword,
-        selected_keywords
-    )
-    
+    raw_places = search_places_google(location_str, radius_km, search_query_keyword)
     if not raw_places:
         return []
 
@@ -730,10 +471,8 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
             p["regular_opening_hours"], p["open_now_fallback"], arrival_dt
         )
 
-    
         if open_status is False:
             continue
-        
 
         p["arrival_dt"] = arrival_dt
         p["drive_time_min"] = drive_time_min
@@ -778,7 +517,7 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
 
     【出力ルール】
     - 入力リストに存在する店舗のみを使ってください。
-    - 「reviews (口コミ)」や店名から、代表的な人気メニュー3選（価格目安もわかれば併記）を「popular_menu」の配列として必ず作成してください。口コミが少ない場合でも、店名や業態（ラーメン、カフェ、焼肉など）から想像される定番メニューを必ず補完出力してください。空にしてはいけません。
+    - 「reviews (口コミ)」や店名から、代表的な人気メニュー3選（価格目安もわかれば併記）を「popular_menu」の配列として必ず作成してください。空にしてはいけません。
     - 各店舗について、予算目安（例: 1000〜2000円）と、ドライブで訪れるべき魅力を簡潔な「buzz_reason」として作成してください。
     - 以下のJSON配列フォーマットのみを出力してください。
 
@@ -786,8 +525,8 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
       {{
         "id": 0,
         "budget_name": "1000〜2000円",
-        "popular_menu": ["人気ラーメン (850円)", "特製餃子 (450円)", "チャーシュー丼 (350円)"],
-        "buzz_reason": "深夜まで大人気の行列ができるラーメン店です！"
+        "popular_menu": ["人気メニュー1 (850円)", "メニュー2 (450円)", "メニュー3 (350円)"],
+        "buzz_reason": "大変おすすめのスポットです！"
       }}
     ]
     """
@@ -805,7 +544,6 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
     except Exception:
         pass
 
-    # 万が一 JSON パースエラーが発生した場合の安全なバックアップマージ
     if not ranked_indices:
         ranked_indices = [
             {
@@ -830,7 +568,6 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
         rating = base_info["rating"]
         review_count = base_info["review_count"]
 
-        # メニューが空の場合は業態から補完
         menu_list = item.get("popular_menu", [])
         if not menu_list:
             menu_list = ["定番おすすめメニュー", "人気商品"]
@@ -1006,14 +743,12 @@ def main():
                         with cols[0]:
                             st.subheader(r["name"])
                             
-                            # 写真リストの表示 (最大2枚)
                             if r.get("photo_urls"):
                                 img_cols = st.columns(min(len(r["photo_urls"]), 2))
                                 for i, img_url in enumerate(r["photo_urls"][:2]):
                                     with img_cols[i]:
                                         st.image(img_url, use_container_width=True)
 
-                            # ★ AIが口コミから抽出した人気メニューの表示
                             if r.get("popular_menu"):
                                 st.write("🍽️ **おすすめ・人気メニュー**")
                                 for item in r["popular_menu"]:

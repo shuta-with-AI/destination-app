@@ -37,6 +37,12 @@ GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 client = None
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
+    
+    try:
+        for m in client.models.list():
+            st.write(m.name)
+    except Exception as e:
+        st.error(e)
 
 PURPOSE_KEYWORDS = {
     "ご飯": "レストラン",
@@ -196,7 +202,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
 
     try:
         response = client.models.generate_content(
-            model='gemini-2.5-flash-light',
+            model='gemini-2.5-flash',
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"

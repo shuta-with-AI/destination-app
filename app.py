@@ -281,7 +281,7 @@ def search_places_text_all(location_str, radius_km, search_query_keyword):
     body = {
         "textQuery": search_query_keyword,
         "maxResultCount": 20,
-        "locationRestriction": {
+        "locationBias": {
             "circle": {
                 "center": {"latitude": lat, "longitude": lng},
                 "radius": min(radius_km * 1000, 50000)

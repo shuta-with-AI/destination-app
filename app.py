@@ -22,7 +22,7 @@ import traceback
 from google import genai
 from google.genai import types
 import google.genai
-st.write("google-genai version:", google.genai.__version__)
+from zoneinfo import ZoneInfo
 
 # ------------------------------------------------------------
 # 初期設定
@@ -159,9 +159,10 @@ def get_trending_by_shares(limit=10):
 # 到着時刻の判定
 # ------------------------------------------------------------
 def estimate_arrival(distance_km, avg_speed_kmh=30):
+    now = datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
     hours = distance_km / avg_speed_kmh
-    return datetime.datetime.now() + datetime.timedelta(hours=hours)
-
+    return now + datetime.timedelta(hours=hours)
+    
 def navi_url(name):
     return f"https://www.google.com/maps/dir/?api=1&destination={urllib.parse.quote(name)}&travelmode=driving"
 

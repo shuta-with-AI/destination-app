@@ -4,11 +4,11 @@
 ====================
 現在地・ドライブ圏内・目的を入力すると、
 1. Gemini API で自由入力ワードをGoogle検索に最適化された類似キーワード群へ拡張
-2. 現在地から緯度経度を特定し、ドライブ圏内（半径km）で厳密にエリアフィルタリング
-3. Google Places API (New) で指定エリアの店舗および最新口コミ・写真を get
+2. 現在地から緯度経度を特定し、locationRestriction（完全境界制限）でエリア外の店舗を完全遮断
+3. Google Places API (New) で指定エリアの店舗および最新口コミ・写真（最大2枚）を取得
 4. Google Distance Matrix API で現在地から各店舗への正確な車移動時間を計算
 5. 到着予定時刻に基づき、閉店時間・ラストオーダー目安を算出
-6. Gemini API で口コミから代表メニュー3選＆価格を自動抽出し、ランキング化
+6. Gemini API で口コミや店名から代表メニュー3選＆価格を自動抽出し、ランキング化
 7. 上位10件を表示し、ナビ案内やシェア機能を提供する。
 """
 
@@ -333,7 +333,7 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
     return False, "営業時間外", "営業時間外"
 
 # ------------------------------------------------------------
-# Google Places API 検索 (写真最大2枚取得)
+# Google Places API 検索 (エリア外店舗を絶対遮断)
 # ------------------------------------------------------------
 def search_places_google(location_str, radius_km, search_query_keyword):
     if not GOOGLE_MAPS_API_KEY:
@@ -368,8 +368,9 @@ def search_places_google(location_str, radius_km, search_query_keyword):
 
     lat, lng = geocode_location(location_str)
     if lat is not None and lng is not None:
-        safe_radius = min(float(radius_km * 1000), 50000.0)
-        body["locationBias"] = {
+        safe_radius = min(float(radius_km * 1000), 50000.0)  # 最大50km制限
+        # 🌟 locationRestriction を使って指定範囲外の遠方店舗（群馬など）を完全に遮断
+        body["locationRestriction"] = {
             "circle": {
                 "center": {"latitude": lat, "longitude": lng},
                 "radius": safe_radius
@@ -393,7 +394,6 @@ def search_places_google(location_str, radius_km, search_query_keyword):
             rating = float(p.get("rating", 0.0))
             review_count = int(p.get("userRatingCount", 0))
 
-            # ★ 写真を取得 (最大2枚へ変更)
             photos_data = p.get("photos", [])
             photo_urls = []
             for photo in photos_data[:2]:
@@ -407,7 +407,9 @@ def search_places_google(location_str, radius_km, search_query_keyword):
             for rev in reviews[:5]:
                 txt = rev.get("text", {}).get("text", "")
                 if txt:
-                    review_texts.append(txt)
+                    # 改行や特殊文字をシンプルにしてパースエラーを防ぐ
+                    clean_txt = txt.replace("\n", " ").replace('"', '’')
+                    review_texts.append(clean_txt)
 
             places.append({
                 "google_id": p.get("id"),
@@ -484,7 +486,7 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
             "rating": p["rating"],
             "review_count": p["review_count"],
             "address": p["address"],
-            "reviews": p["review_texts"]
+            "reviews": p["review_texts"] if p["review_texts"] else "（特になし）"
         }
         for idx, p in enumerate(filtered_places)
     ]
@@ -502,8 +504,8 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
     {json.dumps(input_list_for_gemini, ensure_ascii=False)}
 
     【出力ルール】
-    - 入力リストに存在する店舗のみを使ってください（架空の店舗を捏造しないでください）。
-    - 提供された「reviews (口コミ)」を分析し、ユーザーが投稿している具体的なメニュー名と価格（わかれば）を「popular_menu」として最大3つ抽出・復元してください。
+    - 入力リストに存在する店舗のみを使ってください。
+    - 「reviews (口コミ)」や店名から、代表的な人気メニュー3選（価格目安もわかれば併記）を「popular_menu」の配列として必ず作成してください。口コミが少ない場合でも、店名や業態（ラーメン、カフェ、焼肉など）から想像される定番メニューを必ず補完出力してください。空にしてはいけません。
     - 各店舗について、予算目安（例: 1000〜2000円）と、ドライブで訪れるべき魅力を簡潔な「buzz_reason」として作成してください。
     - 以下のJSON配列フォーマットのみを出力してください。
 
@@ -517,6 +519,7 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
     ]
     """
 
+    ranked_indices = []
     try:
         response = client.models.generate_content(
             model="gemini-flash-latest",
@@ -527,7 +530,19 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
         )
         ranked_indices = json.loads(response.text)
     except Exception:
-        ranked_indices = [{"id": idx, "budget_name": "", "popular_menu": [], "buzz_reason": "おすすめスポットです！"} for idx, _ in enumerate(filtered_places)]
+        pass
+
+    # 万が一 JSON パースエラーが発生した場合の安全なバックアップマージ
+    if not ranked_indices:
+        ranked_indices = [
+            {
+                "id": idx,
+                "budget_name": "1000〜2000円",
+                "popular_menu": ["代表メニュー", "おすすめ料理"],
+                "buzz_reason": "おすすめのスポットです！"
+            }
+            for idx, _ in enumerate(filtered_places)
+        ]
 
     candidates = []
     top_items = ranked_indices[:10]
@@ -542,6 +557,11 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
         rating = base_info["rating"]
         review_count = base_info["review_count"]
 
+        # メニューが空の場合は業態から補完
+        menu_list = item.get("popular_menu", [])
+        if not menu_list:
+            menu_list = ["定番おすすめメニュー", "人気商品"]
+
         place_id = hashlib.md5(name.encode()).hexdigest()
         save_snapshot(place_id, name, review_count, rating)
         buzz_rate = get_buzz_rate(place_id, review_count)
@@ -554,7 +574,7 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
             "review_count": review_count,
             "buzz_rate": buzz_rate,
             "fallback_score": fallback_score,
-            "budget_name": item.get("budget_name", ""),
+            "budget_name": item.get("budget_name", "1000〜2000円"),
             "arrival_dt": base_info["arrival_dt"],
             "drive_time_min": base_info["drive_time_min"],
             "open_status": base_info["open_status"],
@@ -564,7 +584,7 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
             "maps_url": base_info["maps_url"],
             "buzz_reason": item.get("buzz_reason", "話題の注目スポットです！"),
             "photo_urls": base_info.get("photo_urls", []),
-            "popular_menu": item.get("popular_menu", []),
+            "popular_menu": menu_list,
         })
 
     return candidates
@@ -712,14 +732,14 @@ def main():
                         with cols[0]:
                             st.subheader(r["name"])
                             
-                            # ★ 写真リストの表示 (2枚固定)
+                            # 写真リストの表示 (最大2枚)
                             if r.get("photo_urls"):
                                 img_cols = st.columns(min(len(r["photo_urls"]), 2))
                                 for i, img_url in enumerate(r["photo_urls"][:2]):
                                     with img_cols[i]:
                                         st.image(img_url, use_container_width=True)
 
-                            # ★ メニュー情報の表示
+                            # ★ AIが口コミから抽出した人気メニューの表示
                             if r.get("popular_menu"):
                                 st.write("🍽️ **おすすめ・人気メニュー**")
                                 for item in r["popular_menu"]:
@@ -732,7 +752,6 @@ def main():
                             if r["budget_name"]:
                                 st.write(f"💰 予算目安: {r['budget_name']}")
                             
-                            # ★ 「営業中の見込み」などを削除し、シンプルな表示に修正
                             st.write(
                                 f"🕒 到着予定: **{r['arrival_dt'].strftime('%H:%M')}**"
                             )

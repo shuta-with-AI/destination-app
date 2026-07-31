@@ -256,10 +256,15 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
 # Google Places API (Text Search) 全件全取得 (最大60件)
 # ------------------------------------------------------------
 def search_places_text_all(location_str, radius_km, search_query_keyword):
-    """ pageToken を使用して20件の上限を突破し、圏内の該当全店舗を取得する """
-    if not GOOGLE_MAPS_API_KEY: return []
+    if not GOOGLE_MAPS_API_KEY:
+        st.error("GOOGLE_MAPS_API_KEY が未設定です。")
+        return []
+        
     lat, lng = geocode_location(location_str)
-    if lat is None or lng is None: return []
+    st.info(f"🔎 1. 座標確認: lat={lat}, lng={lng}")
+    if lat is None or lng is None:
+        st.error("現在地の取得に失敗しました。")
+        return []
 
     url = "https://places.googleapis.com/v1/places:searchText"
     headers = {
@@ -273,56 +278,52 @@ def search_places_text_all(location_str, radius_km, search_query_keyword):
         ),
     }
     
-    all_raw_places = []
-    next_page_token = None
-    
-    # 最大3回（計60件）リクエストを実行してエリア内の全店舗を網羅
-    for _ in range(3):
-        body = {
-            "textQuery": search_query_keyword,
-            "maxResultCount": 20,
-            "locationRestriction": {
-                "circle": {
-                    "center": {"latitude": lat, "longitude": lng},
-                    "radius": min(radius_km * 1000, 50000)
-                }
+    body = {
+        "textQuery": search_query_keyword,
+        "maxResultCount": 20,
+        "locationRestriction": {
+            "circle": {
+                "center": {"latitude": lat, "longitude": lng},
+                "radius": min(radius_km * 1000, 50000)
             }
         }
-        if next_page_token:
-            body["pageToken"] = next_page_token
+    }
+    
+    st.info(f"🔎 2. リクエスト送信中... クエリ: 「{search_query_keyword}」 / 半径: {radius_km}km")
 
-        try:
-            r = requests.post(url, headers=headers, json=body, timeout=10)
-            if r.status_code != 200: break
-            res_data = r.json()
-            raw_places = res_data.get("places", [])
-            all_raw_places.extend(raw_places)
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=10)
+        st.info(f"🔎 3. APIレスポンスステータス: {r.status_code}")
+        
+        if r.status_code != 200:
+            st.error(f"APIエラー詳細: {r.text}")
+            return []
             
-            next_page_token = res_data.get("nextPageToken")
-            if not next_page_token:
-                break
-            time.sleep(1.5) # nextPageToken有効化のためのウェイト
-        except Exception:
-            break
+        res_data = r.json()
+        raw_places = res_data.get("places", [])
+        st.info(f"🔎 4. API取得成功件数（生の取得数）: {len(raw_places)}件")
+        
+        # 取得できた店名をいくつか表示してみる
+        if raw_places:
+            sample_names = [p.get("displayName", {}).get("text", "") for p in raw_places[:3]]
+            st.write(f"取得サンプル: {sample_names}")
+            
+    except Exception as e:
+        st.error(f"通信例外が発生しました: {e}")
+        return []
 
-    # ノイズキーワード除外
+    # 以下フィルタリング処理...
     unwanted_name_keywords = ["ホテル", "hotel", "旅館", "宿", "シネマ", "cinema", "映画館", "マクドナルド", "すき家", "吉野家"]
     
     places = []
     seen_ids = set()
-    for p in all_raw_places:
+    for p in raw_places:
         pid = p.get("id")
         if not pid or pid in seen_ids: continue
         seen_ids.add(pid)
 
         name_check = p.get("displayName", {}).get("text", "")
         if any(x in name_check.lower() for x in unwanted_name_keywords): continue
-
-        photo_urls = []
-        for photo in p.get("photos", [])[:2]:
-            photo_name = photo.get("name")
-            if photo_name:
-                photo_urls.append(f"https://places.googleapis.com/v1/{photo_name}/media?key={GOOGLE_MAPS_API_KEY}&maxHeightPx=400&maxWidthPx=400")
 
         review_texts = [rev.get("text", {}).get("text", "").replace("\n", " ") for rev in p.get("reviews", [])[:5] if rev.get("text", {}).get("text")]
         
@@ -336,7 +337,7 @@ def search_places_text_all(location_str, radius_km, search_query_keyword):
             "regular_opening_hours": p.get("regularOpeningHours"),
             "open_now_fallback": p.get("currentOpeningHours", {}).get("openNow"),
             "location": p.get("location"),
-            "photo_urls": photo_urls,
+            "photo_urls": [],
             "review_texts": " / ".join(review_texts)
         })
     return places

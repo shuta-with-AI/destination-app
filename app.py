@@ -3,9 +3,11 @@
 ドライブ先提案アプリ
 ====================
 現在地・ドライブ圏内・目的を入力すると、
-1. Google Places API で指定エリアの店舗を検索し、到着時刻の営業状況でフィルタリング
-2. Gemini API で営業確定店舗をランキング化・おすすめ理由（buzz_reason）を生成
-3. 上位10件を表示し、ナビ案内やシェア機能を提供する。
+1. Google Places API (New) で指定エリアの店舗を検索
+2. Google Routes API で現在地から各店舗への正確な車移動時間を一括計算
+3. 店舗ごとに異なる到着予定時刻に基づき、営業状況（24時間・深夜営業対応）を判定
+4. Gemini API で営業確定店舗をランキング化し、おすすめ理由（buzz_reason）や予算感を生成
+5. 上位10件を表示し、ナビ案内やシェア機能を提供する。
 """
 
 import streamlit as st
@@ -51,7 +53,7 @@ RANGE_OPTIONS = {
 }
 
 # ------------------------------------------------------------
-# DB処理
+# DB処理 (SQLite)
 # ------------------------------------------------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -148,37 +150,86 @@ def get_trending_by_shares(limit=10):
     return rows
 
 # ------------------------------------------------------------
-# 営業時間判定 & Google Places API連携
+# Google Routes API 連携 (移動時間計算)
 # ------------------------------------------------------------
-def estimate_arrival(distance_km, avg_speed_kmh=30):
-    now = datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
-    hours = distance_km / avg_speed_kmh
-    return now + datetime.timedelta(hours=hours)
+def get_routes_matrix(origin_str, destinations):
+    """
+    Routes API (computeRouteMatrix) を使い、現在地から各目的地への走行時間(秒)を一括取得
+    """
+    if not GOOGLE_MAPS_API_KEY or not destinations:
+        return {}
 
+    url = "https://routes.googleapis.com/distanceMatrix/v1:computeRouteMatrix"
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+        "X-Goog-FieldMask": "originIndex,destinationIndex,duration,distanceMeters,status"
+    }
+
+    # 出発地 (現在地)
+    if "," in origin_str and not any(c in origin_str for c in ["県", "市", "区", "町"]):
+        try:
+            lat, lng = map(float, origin_str.split(","))
+            origin_waypoint = {"waypoint": {"location": {"latLng": {"latitude": lat, "longitude": lng}}}}
+        except Exception:
+            origin_waypoint = {"waypoint": {"address": origin_str}}
+    else:
+        origin_waypoint = {"waypoint": {"address": origin_str}}
+
+    # 目的地リスト
+    dest_waypoints = []
+    for d in destinations:
+        loc = d.get("location")
+        if loc and "latitude" in loc and "longitude" in loc:
+            dest_waypoints.append({"waypoint": {"location": {"latLng": {"latitude": loc["latitude"], "longitude": loc["longitude"]}}}})
+        else:
+            dest_waypoints.append({"waypoint": {"address": d.get("address", d.get("name"))}})
+
+    body = {
+        "origins": [origin_waypoint],
+        "destinations": dest_waypoints,
+        "travelMode": "DRIVE",
+        "routingPreference": "TRAFFIC_AWARE"
+    }
+
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=10)
+        if r.status_code != 200:
+            return {}
+
+        results = {}
+        for item in r.json():
+            dest_idx = item.get("destinationIndex")
+            duration_str = item.get("duration", "0s")  # 例: "1250s"
+            seconds = int(duration_str.replace("s", "")) if duration_str.endswith("s") else 0
+            results[dest_idx] = seconds
+
+        return results
+    except Exception:
+        return {}
+
+# ------------------------------------------------------------
+# 高度な営業時間判定
+# ------------------------------------------------------------
 def check_open_at_time(regular_opening_hours, open_now_fallback, arrival_dt):
     """
     到着予定時刻(arrival_dt)に営業しているかを判定する
     （24時間営業・日またぎ・週またぎの深夜営業にも完全対応）
     """
     if not regular_opening_hours or "periods" not in regular_opening_hours:
-        # スケジュール情報がない場合は、現在の営業フラグを代用
         return open_now_fallback if open_now_fallback is not None else True
 
     periods = regular_opening_hours.get("periods", [])
     
-    # 🌟 特例：Google APIが返す「完全24時間営業」の判定
-    # （日曜日0:00開始で終了時間がない場合は24時間営業）
+    # 24時間営業判定
     if len(periods) == 1:
         op = periods[0].get("open", {})
         if op.get("day") == 0 and op.get("hour") == 0 and op.get("minute") == 0 and "close" not in periods[0]:
             return True
 
-    # Google APIの曜日: SUN=0, MON=1, TUE=2, WED=3, THU=4, FRI=5, SAT=6
-    # Python weekday(): MON=0, ..., SUN=6
     python_weekday = arrival_dt.weekday()
     target_day = (python_weekday + 1) % 7
-    
-    # 1週間を「日曜日0時0分からの経過分」に換算する
     arrival_minutes = target_day * 24 * 60 + arrival_dt.hour * 60 + arrival_dt.minute
     
     for period in periods:
@@ -190,28 +241,26 @@ def check_open_at_time(regular_opening_hours, open_now_fallback, arrival_dt):
             
         open_minutes = open_info.get("day", 0) * 24 * 60 + open_info.get("hour", 0) * 60 + open_info.get("minute", 0)
         
-        # 終了時間が未定義の場合は24時間開いているとみなす
         if not close_info:
             return True
             
         close_minutes = close_info.get("day", 0) * 24 * 60 + close_info.get("hour", 0) * 60 + close_info.get("minute", 0)
         
-        # 🌟 日またぎ・週またぎ（土曜深夜〜日曜朝）の対応
-        # 終了時間が開始時間より前になる場合は、1週間分（10080分）足して辻褄を合わせる
         if close_minutes <= open_minutes:
             close_minutes += 7 * 24 * 60
             
-        # 到着時刻が営業時間内に収まっているか判定
-        # （到着時刻自体が週をまたいでいるケース用に、1週間足した値でもチェックする）
         if (open_minutes <= arrival_minutes < close_minutes) or \
            (open_minutes <= (arrival_minutes + 7 * 24 * 60) < close_minutes):
             return True
             
     return False
 
-def search_open_places_google(location_str, radius_km, purpose, arrival_dt):
+# ------------------------------------------------------------
+# Google Places API 検索
+# ------------------------------------------------------------
+def search_places_google(location_str, radius_km, purpose):
     """
-    Google Places API (New) で周辺店舗を直検索
+    Google Places API (New) で周辺店舗を直検索 (座標情報を含む)
     """
     if not GOOGLE_MAPS_API_KEY:
         st.error("GOOGLE_MAPS_API_KEY が未設定です。")
@@ -230,7 +279,8 @@ def search_open_places_google(location_str, radius_km, purpose, arrival_dt):
             "places.userRatingCount,"
             "places.regularOpeningHours,"
             "places.currentOpeningHours.openNow,"
-            "places.googleMapsUri"
+            "places.googleMapsUri,"
+            "places.location"  # ★ Routes API用に座標を取得
         ),
     }
 
@@ -241,15 +291,15 @@ def search_open_places_google(location_str, radius_km, purpose, arrival_dt):
         "maxResultCount": 20
     }
 
-    # 緯度・経度の場合は locationBias を設定して精度を高める
     if "," in location_str and not any(c in location_str for c in ["県", "市", "区", "町"]):
         try:
             lat_str, lng_str = location_str.split(",")
             lat, lng = float(lat_str), float(lng_str)
+            safe_radius = min(float(radius_km * 1000), 50000.0)
             body["locationBias"] = {
                 "circle": {
                     "center": {"latitude": lat, "longitude": lng},
-                    "radius": float(radius_km * 1000)
+                    "radius": safe_radius
                 }
             }
         except Exception:
@@ -260,39 +310,35 @@ def search_open_places_google(location_str, radius_km, purpose, arrival_dt):
     try:
         r = requests.post(url, headers=headers, json=body, timeout=8)
         if r.status_code != 200:
+            st.error(f"Google API エラー (ステータスコード: {r.status_code})")
+            st.json(r.json())
             return []
 
         data = r.json()
         raw_places = data.get("places", [])
 
-        open_places = []
+        places = []
         for p in raw_places:
-            hours = p.get("regularOpeningHours")
-            open_now_fallback = p.get("currentOpeningHours", {}).get("openNow")
-
-            open_status = check_open_at_time(hours, open_now_fallback, arrival_dt)
-
-            # 確実に「営業外(False)」の時のみスキップ
-            if open_status is False:
-                continue
-
             name = p.get("displayName", {}).get("text", "")
             rating = float(p.get("rating", 0.0))
             review_count = int(p.get("userRatingCount", 0))
 
-            open_places.append({
+            places.append({
                 "google_id": p.get("id"),
                 "name": name,
                 "address": p.get("formattedAddress", ""),
                 "rating": rating,
                 "review_count": review_count,
                 "maps_url": p.get("googleMapsUri", f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(name)}"),
-                "open_status": open_status
+                "regular_opening_hours": p.get("regularOpeningHours"),
+                "open_now_fallback": p.get("currentOpeningHours", {}).get("openNow"),
+                "location": p.get("location")  # {'latitude': ..., 'longitude': ...}
             })
 
-        return open_places
+        return places
 
-    except Exception:
+    except Exception as e:
+        st.error(f"通信エラーが発生しました: {str(e)}")
         return []
 
 # ------------------------------------------------------------
@@ -303,22 +349,48 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         st.error("GEMINI_API_KEY が読み込めていません。Secretsの設定を確認してください。")
         return []
 
-    dist = radius_km / 2
-    arrival_dt = estimate_arrival(dist)
+    now = datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
 
-    # STEP 1: Google Places API から店舗リストを取得
-    google_results = search_open_places_google(location_str, radius_km, purpose, arrival_dt)
-
-    if not google_results:
+    # STEP 1: Google Places API から候補店舗を検索
+    raw_places = search_places_google(location_str, radius_km, purpose)
+    if not raw_places:
         return []
 
-    # 最低評価でのフィルタリング（該当店舗が少なすぎる場合は最低評価基準を自動調整）
-    filtered_places = [p for p in google_results if p["rating"] >= min_rating]
-    if len(filtered_places) < 3:
-        # 最低評価に届く候補が少なすぎる場合はGoogle検索結果全体を使用
-        filtered_places = google_results
+    # STEP 2: Routes API で現在地から各店舗への個別移動時間(秒)を取得
+    durations_map = get_routes_matrix(location_str, raw_places)
 
-    # STEP 2: Gemini に評価・ランキング・紹介文を生成させる
+    # STEP 3: 店舗ごとの個別の到着予定時間を計算 & 営業中店舗のフィルタリング
+    open_places = []
+    for idx, p in enumerate(raw_places):
+        # Routes APIから時間取得できなければ平均30km/hの簡易計算でフォールバック
+        drive_seconds = durations_map.get(idx)
+        if drive_seconds is not None and drive_seconds > 0:
+            arrival_dt = now + datetime.timedelta(seconds=drive_seconds)
+            drive_time_min = math.ceil(drive_seconds / 60)
+        else:
+            arrival_dt = now + datetime.timedelta(hours=(radius_km / 2) / 30)
+            drive_time_min = None
+
+        # 到着時刻での営業判定
+        open_status = check_open_at_time(p["regular_opening_hours"], p["open_now_fallback"], arrival_dt)
+
+        if open_status is False:
+            continue
+
+        p["arrival_dt"] = arrival_dt
+        p["drive_time_min"] = drive_time_min
+        p["open_status"] = open_status
+        open_places.append(p)
+
+    if not open_places:
+        return []
+
+    # 最低評価でのフィルタリング（条件が厳しすぎる場合の自動補正）
+    filtered_places = [p for p in open_places if p["rating"] >= min_rating]
+    if len(filtered_places) < 3:
+        filtered_places = open_places
+
+    # STEP 4: Gemini に評価・ランキング・おすすめ理由・予算感を生成させる
     input_list_for_gemini = [
         {
             "id": idx,
@@ -343,7 +415,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     {json.dumps(input_list_for_gemini, ensure_ascii=False)}
 
     【出力ルール】
-    - 入力リストに存在する店舗のみを使ってください。
+    - 入力リストに存在する店舗のみを使ってください（架空の店舗を捏造しないでください）。
     - 各店舗について、予算目安（例: 1000〜2000円）と、ドライブで訪れるべき魅力を簡潔な「buzz_reason」として作成してください。
     - 以下のJSON配列フォーマットのみを出力してください。
 
@@ -368,7 +440,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     except Exception:
         ranked_indices = [{"id": idx, "budget_name": "", "buzz_reason": "おすすめスポットです！"} for idx, _ in enumerate(filtered_places)]
 
-    # STEP 3: データマージ
+    # STEP 5: データのマージと整形
     candidates = []
     for item in ranked_indices:
         idx = item.get("id")
@@ -393,7 +465,8 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
             "buzz_rate": buzz_rate,
             "fallback_score": fallback_score,
             "budget_name": item.get("budget_name", ""),
-            "arrival_dt": arrival_dt,
+            "arrival_dt": base_info["arrival_dt"],
+            "drive_time_min": base_info["drive_time_min"],
             "open_status": base_info["open_status"],
             "address": base_info["address"],
             "maps_url": base_info["maps_url"],
@@ -403,7 +476,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     return candidates[:10]
 
 # ------------------------------------------------------------
-# UI
+# UI 画面構成
 # ------------------------------------------------------------
 def main():
     init_db()
@@ -471,7 +544,7 @@ def main():
             elif not GEMINI_API_KEY or not GOOGLE_MAPS_API_KEY:
                 st.error("APIキーが未設定のため検索できません。")
             else:
-                with st.spinner("Google Mapsから営業中スポットを取得し、Geminiで厳選中..."):
+                with st.spinner("Google Maps & Routesから移動時間と営業状況を取得し、Geminiで厳選中..."):
                     results = run_search(location_str, radius_km, purpose, budget_filter, min_rating)
 
                 if not results:
@@ -488,8 +561,11 @@ def main():
                             
                             if r["budget_name"]:
                                 st.write(f"💰 予算目安: {r['budget_name']}")
+                            
+                            # 所要時間表示の組み立て
+                            time_info = f"車で約{r['drive_time_min']}分" if r["drive_time_min"] is not None else "到着予定"
                             st.write(
-                                f"🕒 到着予定: {r['arrival_dt'].strftime('%H:%M')} （営業中の見込み）"
+                                f"🕒 到着予定: {r['arrival_dt'].strftime('%H:%M')} （{time_info} / 営業中の見込み）"
                             )
                             st.caption(f"💬 {r['buzz_reason']}")
 

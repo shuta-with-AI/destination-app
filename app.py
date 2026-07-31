@@ -158,35 +158,55 @@ def estimate_arrival(distance_km, avg_speed_kmh=30):
 def check_open_at_time(regular_opening_hours, open_now_fallback, arrival_dt):
     """
     到着予定時刻(arrival_dt)に営業しているかを判定する
-    戻り値: True(営業中), False(営業時間外), None(判定不能)
+    （24時間営業・日またぎ・週またぎの深夜営業にも完全対応）
     """
     if not regular_opening_hours or "periods" not in regular_opening_hours:
-        # スケジュール情報がない場合は、現在の営業フラグを代用（TrueまたはNone）
+        # スケジュール情報がない場合は、現在の営業フラグを代用
         return open_now_fallback if open_now_fallback is not None else True
 
+    periods = regular_opening_hours.get("periods", [])
+    
+    # 🌟 特例：Google APIが返す「完全24時間営業」の判定
+    # （日曜日0:00開始で終了時間がない場合は24時間営業）
+    if len(periods) == 1:
+        op = periods[0].get("open", {})
+        if op.get("day") == 0 and op.get("hour") == 0 and op.get("minute") == 0 and "close" not in periods[0]:
+            return True
+
+    # Google APIの曜日: SUN=0, MON=1, TUE=2, WED=3, THU=4, FRI=5, SAT=6
+    # Python weekday(): MON=0, ..., SUN=6
     python_weekday = arrival_dt.weekday()
     target_day = (python_weekday + 1) % 7
-    arrival_time_int = arrival_dt.hour * 100 + arrival_dt.minute
-
-    for period in regular_opening_hours.get("periods", []):
+    
+    # 1週間を「日曜日0時0分からの経過分」に換算する
+    arrival_minutes = target_day * 24 * 60 + arrival_dt.hour * 60 + arrival_dt.minute
+    
+    for period in periods:
         open_info = period.get("open", {})
         close_info = period.get("close", {})
-
-        if open_info.get("day") == target_day:
-            open_time = open_info.get("hour", 0) * 100 + open_info.get("minute", 0)
-
-            if not close_info:
-                return True
-
-            close_time = close_info.get("hour", 0) * 100 + close_info.get("minute", 0)
-
-            if close_time < open_time:
-                if arrival_time_int >= open_time or arrival_time_int < close_time:
-                    return True
-            else:
-                if open_time <= arrival_time_int < close_time:
-                    return True
-
+        
+        if not open_info:
+            continue
+            
+        open_minutes = open_info.get("day", 0) * 24 * 60 + open_info.get("hour", 0) * 60 + open_info.get("minute", 0)
+        
+        # 終了時間が未定義の場合は24時間開いているとみなす
+        if not close_info:
+            return True
+            
+        close_minutes = close_info.get("day", 0) * 24 * 60 + close_info.get("hour", 0) * 60 + close_info.get("minute", 0)
+        
+        # 🌟 日またぎ・週またぎ（土曜深夜〜日曜朝）の対応
+        # 終了時間が開始時間より前になる場合は、1週間分（10080分）足して辻褄を合わせる
+        if close_minutes <= open_minutes:
+            close_minutes += 7 * 24 * 60
+            
+        # 到着時刻が営業時間内に収まっているか判定
+        # （到着時刻自体が週をまたいでいるケース用に、1週間足した値でもチェックする）
+        if (open_minutes <= arrival_minutes < close_minutes) or \
+           (open_minutes <= (arrival_minutes + 7 * 24 * 60) < close_minutes):
+            return True
+            
     return False
 
 def search_open_places_google(location_str, radius_km, purpose, arrival_dt):

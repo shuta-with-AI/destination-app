@@ -3,10 +3,10 @@
 ドライブ先提案アプリ
 ====================
 現在地・ドライブ圏内・目的を入力すると、
-1. Google Places API (New) で指定エリアの店舗を検索 (写真付き)
-2. Google Distance Matrix API で現在地から各店舗への正確な車移動時間を一括計算
+1. Google Places API (New) で指定エリアの店舗を検索 (写真最大10枚取得)
+2. Google Distance Matrix API で現在地から各店舗への正確な車移動時間を計算
 3. 店舗ごとに異なる到着予定時刻に基づき、営業状況（24時間・深夜営業対応）を判定
-4. Gemini API で営業確定店舗をランキング化し、おすすめ理由（buzz_reason）や予算感を生成
+4. Gemini Vision API で写真の中から「メニュー表」を自動認識＆OCR解析してメニュー抽出
 5. 上位10件を表示し、ナビ案内やシェア機能を提供する。
 """
 
@@ -19,6 +19,8 @@ import hashlib
 import urllib.parse
 import traceback
 import requests
+import io
+from PIL import Image
 from google import genai
 from google.genai import types
 from zoneinfo import ZoneInfo
@@ -153,15 +155,11 @@ def get_trending_by_shares(limit=10):
 # Google Distance Matrix API 連携 (移動時間計算)
 # ------------------------------------------------------------
 def get_routes_matrix(origin_str, destinations):
-    """
-    Google Maps Distance Matrix API を使い、現在地から各目的地への走行時間(秒)を一括取得
-    """
     if not GOOGLE_MAPS_API_KEY or not destinations:
         return {}
 
     url = "https://maps.googleapis.com/maps/api/distancematrix/json"
     
-    # 目的地のリストをAPIに渡せる形式に変換
     dest_strs = []
     for d in destinations:
         loc = d.get("location")
@@ -183,9 +181,6 @@ def get_routes_matrix(origin_str, destinations):
         data = r.json()
         
         if data.get("status") != "OK":
-            st.error(f"Distance Matrix API エラー: {data.get('status')}")
-            if "error_message" in data:
-                st.error(data["error_message"])
             return {}
 
         results = {}
@@ -200,24 +195,18 @@ def get_routes_matrix(origin_str, destinations):
                 results[idx] = seconds
 
         return results
-    except Exception as e:
-        st.error(f"移動時間取得エラー: {str(e)}")
+    except Exception:
         return {}
 
 # ------------------------------------------------------------
 # 高度な営業時間判定
 # ------------------------------------------------------------
 def check_open_at_time(regular_opening_hours, open_now_fallback, arrival_dt):
-    """
-    到着予定時刻(arrival_dt)に営業しているかを判定する
-    （24時間営業・日またぎ・週またぎの深夜営業にも完全対応）
-    """
     if not regular_opening_hours or "periods" not in regular_opening_hours:
         return open_now_fallback if open_now_fallback is not None else True
 
     periods = regular_opening_hours.get("periods", [])
     
-    # 24時間営業判定
     if len(periods) == 1:
         op = periods[0].get("open", {})
         if op.get("day") == 0 and op.get("hour") == 0 and op.get("minute") == 0 and "close" not in periods[0]:
@@ -251,12 +240,9 @@ def check_open_at_time(regular_opening_hours, open_now_fallback, arrival_dt):
     return False
 
 # ------------------------------------------------------------
-# Google Places API 検索
+# Google Places API 検索 (写真最大10枚取得)
 # ------------------------------------------------------------
 def search_places_google(location_str, radius_km, purpose):
-    """
-    Google Places API (New) で周辺店舗を直検索 (座標と写真を取得)
-    """
     if not GOOGLE_MAPS_API_KEY:
         st.error("GOOGLE_MAPS_API_KEY が未設定です。")
         return []
@@ -276,7 +262,7 @@ def search_places_google(location_str, radius_km, purpose):
             "places.currentOpeningHours.openNow,"
             "places.googleMapsUri,"
             "places.location,"
-            "places.photos"  # ★ 写真データを取得
+            "places.photos"
         ),
     }
 
@@ -284,6 +270,7 @@ def search_places_google(location_str, radius_km, purpose):
 
     body = {
         "textQuery": f"{keyword}",
+        "pageSize": 20,
         "maxResultCount": 20
     }
 
@@ -318,13 +305,13 @@ def search_places_google(location_str, radius_km, purpose):
             rating = float(p.get("rating", 0.0))
             review_count = int(p.get("userRatingCount", 0))
 
-            # 写真URLを最大2枚生成
+            # 写真URLを最大10枚生成
             photos_data = p.get("photos", [])
             photo_urls = []
-            for photo in photos_data[:2]:
+            for photo in photos_data[:10]:
                 photo_name = photo.get("name")
                 if photo_name:
-                    url_img = f"https://places.googleapis.com/v1/{photo_name}/media?key={GOOGLE_MAPS_API_KEY}&maxHeightPx=400&maxWidthPx=400"
+                    url_img = f"https://places.googleapis.com/v1/{photo_name}/media?key={GOOGLE_MAPS_API_KEY}&maxHeightPx=600&maxWidthPx=600"
                     photo_urls.append(url_img)
 
             places.append({
@@ -347,6 +334,72 @@ def search_places_google(location_str, radius_km, purpose):
         return []
 
 # ------------------------------------------------------------
+# Gemini Vision API による「メニュー表画像認識 & OCR解析」
+# ------------------------------------------------------------
+def analyze_menu_from_images(place_name, photo_urls):
+    """
+    写真リストの中からGemini Visionでメニュー表画像を特定し、メニュー項目と価格を抽出する
+    """
+    if not client or not photo_urls:
+        return None, []
+
+    downloaded_images = []
+    image_bytes_list = []
+
+    # 画像をダウンロード (先頭最大5枚までVisionで解析してAPI消費と時間を節約)
+    for url in photo_urls[:5]:
+        try:
+            resp = requests.get(url, timeout=3)
+            if resp.status_code == 200:
+                img = Image.open(io.BytesIO(resp.content))
+                downloaded_images.append((url, img))
+                image_bytes_list.append(img)
+        except Exception:
+            continue
+
+    if not image_bytes_list:
+        return None, []
+
+    prompt = f"""
+    あなたは優秀な画像解析AIです。
+    以下に「{place_name}」の店舗写真（料理、内観、外観、メニュー表など）を複数枚提供します。
+
+    【タスク】
+    1. 提供された写真の中に「メニュー表」「お品書き」「看板」「券売機」など、メニューと価格が写っている画像があるか判定してください。
+    2. メニュー表と思われる画像がある場合、その画像の「index (0始まり)」を「menu_image_index」として指定してください。見当たらない場合は -1 としてください。
+    3. 画像に写っている文字（OCR）から、代表的なメニュー名と価格を抽出して「popular_menu」の配列として出力してください。
+
+    【出力フォーマット (JSONのみ)】
+    {{
+      "menu_image_index": 0,
+      "popular_menu": ["〇〇セット (1,200円)", "〇〇ラーメン (850円)"]
+    }}
+    """
+
+    try:
+        # 画像群とプロンプトをGeminiに一括送信
+        contents = [prompt] + image_bytes_list
+        response = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
+        res_data = json.loads(response.text)
+        menu_idx = res_data.get("menu_image_index", -1)
+        popular_menu = res_data.get("popular_menu", [])
+
+        menu_image_url = None
+        if 0 <= menu_idx < len(downloaded_images):
+            menu_image_url = downloaded_images[menu_idx][0]
+
+        return menu_image_url, popular_menu
+
+    except Exception:
+        return None, []
+
+# ------------------------------------------------------------
 # メイン検索処理
 # ------------------------------------------------------------
 def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
@@ -367,7 +420,6 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     # STEP 3: 店舗ごとの個別の到着予定時間を計算 & 営業中店舗のフィルタリング
     open_places = []
     for idx, p in enumerate(raw_places):
-        # APIから時間取得できなければ平均30km/hの簡易計算でフォールバック
         drive_seconds = durations_map.get(idx)
         if drive_seconds is not None and drive_seconds > 0:
             arrival_dt = now + datetime.timedelta(seconds=drive_seconds)
@@ -376,7 +428,6 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
             arrival_dt = now + datetime.timedelta(hours=(radius_km / 2) / 30)
             drive_time_min = None
 
-        # 到着時刻での営業判定
         open_status = check_open_at_time(p["regular_opening_hours"], p["open_now_fallback"], arrival_dt)
 
         if open_status is False:
@@ -390,9 +441,10 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     if not open_places:
         return []
 
-    # 最低評価でのフィルタリング（条件が厳しすぎる場合の自動補正）
+    # 10件確保のための自動補正
     filtered_places = [p for p in open_places if p["rating"] >= min_rating]
-    if len(filtered_places) < 3:
+    if len(filtered_places) < 10:
+        open_places.sort(key=lambda x: -x["rating"])
         filtered_places = open_places
 
     # STEP 4: Gemini に評価・ランキング・おすすめ理由・予算感を生成させる
@@ -445,9 +497,11 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     except Exception:
         ranked_indices = [{"id": idx, "budget_name": "", "buzz_reason": "おすすめスポットです！"} for idx, _ in enumerate(filtered_places)]
 
-    # STEP 5: データのマージと整形
+    # STEP 5: 上位10件について Vision API でメニュー表画像を特定＆文字起こし
     candidates = []
-    for item in ranked_indices:
+    top_items = ranked_indices[:10]
+
+    for item in top_items:
         idx = item.get("id")
         if idx is None or idx >= len(filtered_places):
             continue
@@ -456,6 +510,9 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         name = base_info["name"]
         rating = base_info["rating"]
         review_count = base_info["review_count"]
+
+        # 🌟 Gemini Vision で「メニュー表画像」を判別＆文字解析
+        menu_img_url, detected_menus = analyze_menu_from_images(name, base_info.get("photo_urls", []))
 
         place_id = hashlib.md5(name.encode()).hexdigest()
         save_snapshot(place_id, name, review_count, rating)
@@ -477,9 +534,11 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
             "maps_url": base_info["maps_url"],
             "buzz_reason": item.get("buzz_reason", "話題の注目スポットです！"),
             "photo_urls": base_info.get("photo_urls", []),
+            "menu_img_url": menu_img_url,       # 🌟 判別されたメニュー画像
+            "detected_menus": detected_menus,   # 🌟 検出されたメニュー名と価格
         })
 
-    return candidates[:10]
+    return candidates
 
 # ------------------------------------------------------------
 # UI 画面構成
@@ -550,7 +609,7 @@ def main():
             elif not GEMINI_API_KEY or not GOOGLE_MAPS_API_KEY:
                 st.error("APIキーが未設定のため検索できません。")
             else:
-                with st.spinner("検索中..."):
+                with st.spinner("検索中... (AIがメニュー画像を解析中)"):
                     results = run_search(location_str, radius_km, purpose, budget_filter, min_rating)
 
                 if not results:
@@ -562,13 +621,23 @@ def main():
                         with cols[0]:
                             st.subheader(r["name"])
                             
-                            # 写真の表示
+                            # 写真リストの表示 (最大4枚)
                             if r.get("photo_urls"):
-                                img_cols = st.columns(len(r["photo_urls"]))
-                                for i, img_url in enumerate(r["photo_urls"]):
+                                img_cols = st.columns(min(len(r["photo_urls"]), 4))
+                                for i, img_url in enumerate(r["photo_urls"][:4]):
                                     with img_cols[i]:
                                         st.image(img_url, use_container_width=True)
-                            
+
+                            # 🌟 AIが判別したメニュー表画像とメニュー文字の表示
+                            if r.get("detected_menus") or r.get("menu_img_url"):
+                                with st.expander("🍽️ AIが見つけたメニュー情報・メニュー表画像"):
+                                    if r.get("menu_img_url"):
+                                        st.image(r["menu_img_url"], caption="AIがメニュー表と判定した画像", width=300)
+                                    if r.get("detected_menus"):
+                                        st.write("**メニュー解析結果:**")
+                                        for m in r["detected_menus"]:
+                                            st.write(f"- {m}")
+
                             if r["address"]:
                                 st.write(f"📍 {r['address']}")
                             st.write(f"⭐ 評価: {r['rating']} ({r['review_count']}件)")
@@ -576,7 +645,6 @@ def main():
                             if r["budget_name"]:
                                 st.write(f"💰 予算目安: {r['budget_name']}")
                             
-                            # 所要時間表示の組み立て
                             time_info = f"車で約{r['drive_time_min']}分" if r["drive_time_min"] is not None else "到着予定"
                             st.write(
                                 f"🕒 到着予定: {r['arrival_dt'].strftime('%H:%M')} （{time_info} / 営業中の見込み）"

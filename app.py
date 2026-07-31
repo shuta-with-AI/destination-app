@@ -334,7 +334,7 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
     return False, "営業時間外", "営業時間外"
 
 # ------------------------------------------------------------
-# Google Places API 検索
+# Google Places API 検索 (駅・学校等を完全除外)
 # ------------------------------------------------------------
 def search_places_google(location_str, radius_km, search_query_keyword):
     if not GOOGLE_MAPS_API_KEY:
@@ -345,6 +345,16 @@ def search_places_google(location_str, radius_km, search_query_keyword):
     if lat is None or lng is None:
         st.error("現在地の取得に失敗しました")
         return []
+
+    # 検索キーワードに応じて適切な includedTypes を設定
+    keyword_lower = search_query_keyword.lower()
+    if any(w in keyword_lower for w in ["カフェ", "パン", "ケーキ", "アイス", "クレープ", "スイーツ", "パフェ"]):
+        included_types = ["cafe", "bakery", "ice_cream_shop"]
+    elif any(w in keyword_lower for w in ["夜景", "海", "公園", "自然", "観光", "展望", "道の駅"]):
+        included_types = ["tourist_attraction", "park"]
+    else:
+        # ご飯・グルメ全般
+        included_types = ["restaurant", "meal_takeaway", "fast_food_restaurant", "bar"]
 
     url = "https://places.googleapis.com/v1/places:searchNearby"
 
@@ -362,12 +372,13 @@ def search_places_google(location_str, radius_km, search_query_keyword):
             "places.googleMapsUri,"
             "places.location,"
             "places.photos,"
-            "places.reviews"
+            "places.reviews,"
+            "places.types"
         ),
     }
 
-    # フィルタリングを厳しくしすぎず、広範に取得できるように設定
     body = {
+        "includedTypes": included_types,
         "maxResultCount": 20,
         "locationRestriction": {
             "circle": {
@@ -390,11 +401,23 @@ def search_places_google(location_str, radius_km, search_query_keyword):
         raw_places = data.get("places", [])
         st.caption(f"Nearby Search取得件数: {len(raw_places)}")
 
+        # 除外したい施設のタイプ
+        unwanted_types = {
+            "transit_station", "train_station", "subway_station", 
+            "university", "school", "bank", "atm", "gas_station", 
+            "parking", "lodging", "hotel"
+        }
+
         places = []
         for p in raw_places:
+            place_types = p.get("types", [])
+            # 駅や学校、ホテルなどが含まれている場合はスキップ
+            if any(t in unwanted_types for t in place_types):
+                continue
+
             name_check = p.get("displayName", {}).get("text", "")
 
-            # ホテル・宿などの除外
+            # 名前にホテルや宿が含まれる場合も除外
             if any(x in name_check.lower() for x in ["ホテル", "hotel", "旅館", "宿"]):
                 continue
 
@@ -434,7 +457,7 @@ def search_places_google(location_str, radius_km, search_query_keyword):
                 "review_texts": " / ".join(review_texts)
             })
 
-        st.caption(f"店名/ホテル除外フィルタ後: {len(places)}")
+        st.caption(f"フィルタ後有効店舗数: {len(places)}")
         return places
 
     except Exception as e:

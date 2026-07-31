@@ -170,7 +170,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         )
         # 404エラー回避のため安定モデル gemini-2.5-flash に変更
         model = genai.GenerativeModel(
-            'gemini-2.5-flash',
+            'gemini-1.5-flash',
             generation_config=generation_config
         )
         

@@ -37,7 +37,7 @@ if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
 
 PURPOSE_KEYWORDS = {
-    "ご飯": "レストラン グルメ",
+    "ご飯": "レストラン グルメ 人気店",
     "スイーツ": "スイーツ カフェ",
     "パン": "パン屋 ベーカリー",
     "景色": "絶景 展望 景色 観光スポット",
@@ -161,11 +161,9 @@ def check_open_at_time(regular_opening_hours, open_now_fallback, arrival_dt):
     戻り値: True(営業中), False(営業時間外), None(判定不能)
     """
     if not regular_opening_hours or "periods" not in regular_opening_hours:
-        # スケジュールが無い場合は現在の営業状態で代替判定（全滅回避）
-        return open_now_fallback
+        # スケジュール情報がない場合は、現在の営業フラグを代用（TrueまたはNone）
+        return open_now_fallback if open_now_fallback is not None else True
 
-    # Google APIの曜日: SUN=0, MON=1, ..., SAT=6
-    # Python weekday(): MON=0, ..., SUN=6
     python_weekday = arrival_dt.weekday()
     target_day = (python_weekday + 1) % 7
     arrival_time_int = arrival_dt.hour * 100 + arrival_dt.minute
@@ -177,13 +175,11 @@ def check_open_at_time(regular_opening_hours, open_now_fallback, arrival_dt):
         if open_info.get("day") == target_day:
             open_time = open_info.get("hour", 0) * 100 + open_info.get("minute", 0)
 
-            # 24時間営業などの対応
             if not close_info:
                 return True
 
             close_time = close_info.get("hour", 0) * 100 + close_info.get("minute", 0)
 
-            # 深夜営業（例: 18:00〜翌2:00）の対応
             if close_time < open_time:
                 if arrival_time_int >= open_time or arrival_time_int < close_time:
                     return True
@@ -195,8 +191,7 @@ def check_open_at_time(regular_opening_hours, open_now_fallback, arrival_dt):
 
 def search_open_places_google(location_str, radius_km, purpose, arrival_dt):
     """
-    1. Google Places API で周辺店舗を直検索
-    2. 到着予定時刻(arrival_dt)に営業している店舗だけを抽出
+    Google Places API (New) で周辺店舗を直検索
     """
     if not GOOGLE_MAPS_API_KEY:
         st.error("GOOGLE_MAPS_API_KEY が未設定です。")
@@ -220,12 +215,27 @@ def search_open_places_google(location_str, radius_km, purpose, arrival_dt):
     }
 
     keyword = PURPOSE_KEYWORDS.get(purpose, purpose)
-    query = f"{location_str} {keyword}"
 
     body = {
-        "textQuery": query,
-        "maxResultCount": 20  # Googleから多めに候補を取得
+        "textQuery": f"{keyword}",
+        "maxResultCount": 20
     }
+
+    # 緯度・経度の場合は locationBias を設定して精度を高める
+    if "," in location_str and not any(c in location_str for c in ["県", "市", "区", "町"]):
+        try:
+            lat_str, lng_str = location_str.split(",")
+            lat, lng = float(lat_str), float(lng_str)
+            body["locationBias"] = {
+                "circle": {
+                    "center": {"latitude": lat, "longitude": lng},
+                    "radius": float(radius_km * 1000)
+                }
+            }
+        except Exception:
+            body["textQuery"] = f"{location_str} {keyword}"
+    else:
+        body["textQuery"] = f"{location_str} {keyword}"
 
     try:
         r = requests.post(url, headers=headers, json=body, timeout=8)
@@ -240,10 +250,9 @@ def search_open_places_google(location_str, radius_km, purpose, arrival_dt):
             hours = p.get("regularOpeningHours")
             open_now_fallback = p.get("currentOpeningHours", {}).get("openNow")
 
-            # 到着時刻の営業判定
             open_status = check_open_at_time(hours, open_now_fallback, arrival_dt)
 
-            # 確実に「営業時間外(False)」であるものだけを除外
+            # 確実に「営業外(False)」の時のみスキップ
             if open_status is False:
                 continue
 
@@ -267,7 +276,7 @@ def search_open_places_google(location_str, radius_km, purpose, arrival_dt):
         return []
 
 # ------------------------------------------------------------
-# メイン検索処理（Googleで営業中を確定 -> Geminiでランキング化）
+# メイン検索処理
 # ------------------------------------------------------------
 def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     if not client:
@@ -277,16 +286,19 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     dist = radius_km / 2
     arrival_dt = estimate_arrival(dist)
 
-    # STEP 1: Google Places API から営業中（見込み含む）の店舗リストを取得
+    # STEP 1: Google Places API から店舗リストを取得
     google_results = search_open_places_google(location_str, radius_km, purpose, arrival_dt)
 
-    # 最低評価でフィルタリング
-    filtered_places = [p for p in google_results if p["rating"] >= min_rating]
-
-    if not filtered_places:
+    if not google_results:
         return []
 
-    # STEP 2: 営業中の店舗リストを Gemini に渡してランキング・紹介文を生成
+    # 最低評価でのフィルタリング（該当店舗が少なすぎる場合は最低評価基準を自動調整）
+    filtered_places = [p for p in google_results if p["rating"] >= min_rating]
+    if len(filtered_places) < 3:
+        # 最低評価に届く候補が少なすぎる場合はGoogle検索結果全体を使用
+        filtered_places = google_results
+
+    # STEP 2: Gemini に評価・ランキング・紹介文を生成させる
     input_list_for_gemini = [
         {
             "id": idx,
@@ -300,7 +312,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
 
     prompt = f"""
     あなたはドライブの目的地提案アシスタントです。
-    以下の【営業中の店舗リスト】の中から、ドライブの目的地として特におすすめ・話題のスポットを厳選し、
+    以下の【営業中の店舗リスト】の中から、ドライブの目的地として特におすすめのスポットを厳選し、
     おすすめ順（ランキング順）に並び替えてJSONで出力してください。
 
     【検索条件】
@@ -311,7 +323,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     {json.dumps(input_list_for_gemini, ensure_ascii=False)}
 
     【出力ルール】
-    - 入力リストに存在する店舗のみを使ってください（新しい店舗を捏造しないでください）。
+    - 入力リストに存在する店舗のみを使ってください。
     - 各店舗について、予算目安（例: 1000〜2000円）と、ドライブで訪れるべき魅力を簡潔な「buzz_reason」として作成してください。
     - 以下のJSON配列フォーマットのみを出力してください。
 
@@ -334,10 +346,9 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         )
         ranked_indices = json.loads(response.text)
     except Exception:
-        # 万が一 Gemini の呼び出しに失敗した場合は評価順でフォールバック
         ranked_indices = [{"id": idx, "budget_name": "", "buzz_reason": "おすすめスポットです！"} for idx, _ in enumerate(filtered_places)]
 
-    # STEP 3: Geminiのランキング結果とGoogleの正確な情報をマージ
+    # STEP 3: データマージ
     candidates = []
     for item in ranked_indices:
         idx = item.get("id")
@@ -444,7 +455,7 @@ def main():
                     results = run_search(location_str, radius_km, purpose, budget_filter, min_rating)
 
                 if not results:
-                    st.info("条件に合う営業中のスポットが見つかりませんでした。最低評価を下げるか、検索範囲を広げて再試行してください。")
+                    st.info("条件に合う営業中のスポットが見つかりませんでした。目的を変更するか、検索範囲を広げて再試行してください。")
 
                 for r in results:
                     with st.container(border=True):

@@ -512,7 +512,7 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
             )
 
             if "ラーメン" in keyword_text:
-
+                
                 if not any(x in name_check for x in [
                     "ラーメン",
                     "麺",
@@ -520,22 +520,22 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
                 ]):
                     continue
 
-            if any(x in keyword_text for x in [
-                "スイーツ",
-                "アイス",
-                "ケーキ",
-                "クレープ"
-            ]):
+                if any(x in keyword_text for x in [
+                    "スイーツ",
+                    "アイス",
+                    "ケーキ",
+                    "クレープ"
+                ]):
 
-            if not any(x in name_check for x in [
-                "カフェ",
-                "ケーキ",
-                "菓子",
-                "スイーツ",
-                "ジェラート",
-                "アイス"
-            ]):
-                continue
+                if not any(x in name_check for x in [
+                    "カフェ",
+                    "ケーキ",
+                    "菓子",
+                    "スイーツ",
+                    "ジェラート",
+                    "アイス"
+                ]):
+                    continue
 
             rating = float(
                 p.get(

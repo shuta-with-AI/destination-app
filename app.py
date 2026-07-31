@@ -518,6 +518,7 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
                 ""
             )
 
+            """
             if "ラーメン" in keyword_text:
                 
                 if not any(x in name_check for x in [
@@ -545,6 +546,8 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
                     "ベーカリー"
                 ]):
                     continue
+
+            """
 
             if any(x in name_check.lower() for x in [
                 "ホテル",
@@ -677,6 +680,7 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
 
             })
 
+        st.caption(f"店名/ホテル除外フィルタ後: {len(places)}")
 
         return places
 
@@ -738,10 +742,12 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
         p["last_order_str"] = last_order_str
         open_places.append(p)
 
+    st.caption(f"営業時間フィルタ後(open_places): {len(open_places)}")
     if not open_places:
         return []
 
     filtered_places = [p for p in open_places if p["rating"] >= min_rating]
+    st.caption(f"評価フィルタ後(filtered_places, min_rating={min_rating}): {len(filtered_places)}")
     if len(filtered_places) < 10:
         open_places.sort(key=lambda x: -x["rating"])
         filtered_places = open_places

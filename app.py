@@ -201,8 +201,12 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         )
         raw_results = json.loads(response.text)
         
+    import traceback
+
     except Exception as e:
-        st.error(f"Gemini API通信・解析エラー: {e}")
+        st.error(type(e))
+        st.error(str(e))
+        st.code(traceback.format_exc())
         return []
 
     candidates = []

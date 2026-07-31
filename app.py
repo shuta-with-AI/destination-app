@@ -388,7 +388,7 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
         "和食",
         "レストラン"
     ]):
-        included_types.update = ([
+        included_types.update([
             "restaurant"
         ])
 
@@ -400,7 +400,7 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
         "クレープ",
         "スイーツ"
     ]):
-        included_types.update = ([
+        included_types.update([
             "cafe",
             "bakery",
             "ice_cream_shop"
@@ -414,13 +414,13 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
         "観光",
         "展望"
     ]):
-        included_types.update = ([
+        included_types.update([
             "tourist_attraction",
             "park",
         ])
 
     else:
-        included_types.update = ([
+        included_types.update([
             "restaurant",
             "cafe",
         ])

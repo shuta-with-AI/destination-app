@@ -2,7 +2,7 @@
 """
 ドライブ先提案アプリ
 ====================
-現在地・ドライブ圏内・目的（折りたたみアコーディオン/親カテゴリ一括チェック/自由入力対応）を入力すると、
+現在地・ドライブ圏内・目的（折りたたみアコーディオン/インデント対応/自由入力対応）を入力すると、
 1. Gemini API で自由入力ワードをGoogle検索に最適化された類似キーワード群へ拡張
 2. 現在地から緯度経度を特定し、ドライブ圏内（半径km）で厳密にエリアフィルタリング
 3. Google Places API (New) で指定エリアの店舗および最新口コミを取得
@@ -42,7 +42,6 @@ if GEMINI_API_KEY:
 
 PURPOSE_DATA = {
     "ご飯": {
-        "icon": "🍚",
         "ジャンル": {
             "ラーメン": "ラーメン 中華そば つけ麺",
             "ハンバーガー": "ハンバーガー グルメバーガー",
@@ -53,7 +52,6 @@ PURPOSE_DATA = {
         }
     },
     "スイーツ": {
-        "icon": "🍰",
         "ジャンル": {
             "アイス・ジェラート": "アイスクリーム ジェラート パフェ",
             "クレープ": "クレープ ガレット",
@@ -63,7 +61,6 @@ PURPOSE_DATA = {
         }
     },
     "景色・観光": {
-        "icon": "🏞️",
         "ジャンル": {
             "夜景・展望台": "夜景 展望台 展望デッキ",
             "海・ドライブコース": "海 沿岸 ドライブコース 砂浜",
@@ -625,9 +622,8 @@ def main():
         
         selected_keywords = []
 
-        # 🌟 折りたたみアコーディオン（expander）でカテゴリごとに段差・階層構造を作成
+        # 🌟 絵文字を削除＆段差インデント（c_indent/c_content）を適用
         for category, cat_info in PURPOSE_DATA.items():
-            icon = cat_info.get("icon", "")
             genres = cat_info["ジャンル"]
             parent_key = f"parent_{category}"
 
@@ -643,8 +639,8 @@ def main():
             if parent_key not in st.session_state:
                 st.session_state[parent_key] = False
 
-            # expander を使って「大元を開くと細分化された選択肢が出る」形式にする
-            with st.expander(f"{icon} {category}"):
+            # expander タイトルから絵文字を削除
+            with st.expander(category):
                 parent_checked = st.checkbox(
                     f"**{category} (全選択)**",
                     key=parent_key,
@@ -652,19 +648,23 @@ def main():
                     args=(category, list(genres.keys()))
                 )
 
+                # 子選択肢に物理的な段差（インデント）を設定
                 for genre_name, genre_keyword in genres.items():
                     child_key = f"child_{category}_{genre_name}"
                     if child_key not in st.session_state:
                         st.session_state[child_key] = parent_checked
 
-                    child_checked = st.checkbox(
-                        f"└ {genre_name}",
-                        key=child_key,
-                        on_change=on_child_change,
-                        args=(category, list(genres.keys()))
-                    )
-                    if child_checked:
-                        selected_keywords.append(genre_keyword)
+                    # 左に少しの余白カラム（0.15）を置いて右に配置
+                    c_indent, c_content = st.columns([0.15, 0.85])
+                    with c_content:
+                        child_checked = st.checkbox(
+                            genre_name,  # 「└ 」を削除
+                            key=child_key,
+                            on_change=on_child_change,
+                            args=(category, list(genres.keys()))
+                        )
+                        if child_checked:
+                            selected_keywords.append(genre_keyword)
 
         st.subheader("🔍 フリーワード入力")
         free_word = st.text_input(

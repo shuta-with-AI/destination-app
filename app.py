@@ -220,8 +220,13 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         """
         
         response = model.generate_content(prompt)
-        
         text = response.text.strip()
+        
+        # --- ここからデバッグ用（AIの生の返答を確認） ---
+        if not text:
+            st.error("Gemini APIから空の返答が返ってきました。APIキーを確認してください。")
+            return []
+            
         if text.startswith("```json"):
             text = text[7:-3].strip()
         elif text.startswith("```"):
@@ -230,7 +235,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         raw_results = json.loads(text)
         
     except Exception as e:
-        st.error(f"Gemini APIによる検索でエラーが発生しました: {e}")
+        st.error(f"詳細エラー情報: {e}")
         return []
 
     candidates = []

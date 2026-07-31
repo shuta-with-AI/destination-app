@@ -383,4 +383,44 @@ def main():
                         cols = st.columns([3, 1])
                         with cols[0]:
                             st.subheader(r["name"])
-                            st.write(f"📍
+                            st.write(f"📍 {r['address']}")
+                            st.write(f"⭐ 評価: {r['rating']} ({r['review_count']}件)")
+                            if r["buzz_rate"] is None:
+                                st.write(
+                                    "📈 口コミ増加率: データ蓄積中(1週間分のデータが必要です)"
+                                    f" ／ 現時点の暫定スコア: {r['fallback_score']}"
+                                    "(評価点と口コミ数から算出。増加率データが揃い次第そちらに切り替わります)"
+                                )
+                            else:
+                                st.write(f"📈 口コミ増加率(直近1週間): {r['buzz_rate']}%")
+                            if r["budget_name"]:
+                                st.write(f"💰 予算目安: {r['budget_name']}")
+                            st.write(
+                                f"🕒 到着予定: {r['arrival_dt'].strftime('%H:%M')} "
+                                f"（{'営業中の見込み' if r['open_status'] else '営業状況不明'}）"
+                            )
+
+                            with st.spinner("話題の理由を確認中..."):
+                                reason = get_buzz_reason_gemini(r["name"], location_str)
+                            st.caption(f"💬 {reason}")
+
+                        with cols[1]:
+                            st.link_button(
+                                "🗺️ ナビ開始", navi_url(r["name"]), use_container_width=True
+                            )
+                            if st.button("📤 シェア", key=f"share_{r['place_id']}", use_container_width=True):
+                                log_share(r["place_id"], r["name"])
+                                st.success("シェアを記録しました!")
+
+    with tab2:
+        st.subheader("アプリ内で人気のスポット(シェア数ランキング)")
+        trending = get_trending_by_shares()
+        if not trending:
+            st.info("まだシェアデータがありません。")
+        else:
+            for i, (name, count) in enumerate(trending, start=1):
+                st.write(f"{i}. **{name}** — {count}回シェアされました")
+
+
+if __name__ == "__main__":
+    main()

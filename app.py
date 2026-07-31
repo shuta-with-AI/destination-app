@@ -233,6 +233,27 @@ def geocode_location(location_str):
 
     return None, None
 
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371.0
+
+    lat1 = math.radians(lat1)
+    lon1 = math.radians(lon1)
+    lat2 = math.radians(lat2)
+    lon2 = math.radians(lon2)
+
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2)
+        * math.sin(dlon / 2) ** 2
+    )
+
+    return 2 * R * math.asin(math.sqrt(a))
+
+
 # ------------------------------------------------------------
 # Google Distance Matrix API 連携
 # ------------------------------------------------------------
@@ -370,7 +391,7 @@ def search_places_google(location_str, radius_km, search_query_keyword):
     if lat is not None and lng is not None:
         safe_radius = min(float(radius_km * 1000), 50000.0)  # 最大50km制限
         # 🌟 locationRestriction を使って指定範囲外の遠方店舗（群馬など）を完全に遮断
-        body["locationRestriction"] = {
+        body["locationBias"] = {
             "circle": {
                 "center": {"latitude": lat, "longitude": lng},
                 "radius": safe_radius
@@ -390,6 +411,18 @@ def search_places_google(location_str, radius_km, search_query_keyword):
 
         places = []
         for p in raw_places:
+            
+            # 半径外の店舗を除外
+            if lat is not None and lng is not None:
+                loc = p.get("location", {})
+                plat = loc.get("latitude")
+                plng = loc.get("longitude")
+
+                if plat is not None and plng is not None:
+                    distance = haversine(lat, lng, plat, plng)
+                    if distance > radius_km:
+                        continue
+
             name = p.get("displayName", {}).get("text", "")
             rating = float(p.get("rating", 0.0))
             review_count = int(p.get("userRatingCount", 0))

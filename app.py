@@ -939,7 +939,7 @@ def main():
                         radius_km,
                         combined_keywords,
                         budget_filter,
-                        min_rating
+                        min_rating,
                         selected_keywords
                     )
 

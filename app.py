@@ -306,8 +306,9 @@ def get_routes_matrix(origin_str, destinations):
 # ------------------------------------------------------------
 def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival_dt):
     if not regular_opening_hours or "periods" not in regular_opening_hours:
-        is_open = open_now_fallback if open_now_fallback is not None else False
-        return is_open, "不明", "不明"
+        if open_now_fallback is not None:
+            return open_now_fallback, "不明", "不明"
+        return True, "情報なし", "情報なし"
 
     periods = regular_opening_hours.get("periods", [])
     
@@ -377,6 +378,8 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
     # -----------------------------
     # 検索タイプ決定
     # -----------------------------
+    included_types = set()
+    
     if any(word in keyword_text for word in [
         "ラーメン",
         "焼肉",
@@ -385,9 +388,9 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
         "和食",
         "レストラン"
     ]):
-        included_types = [
+        included_types.update = ([
             "restaurant"
-        ]
+        ])
 
     elif any(word in keyword_text for word in [
         "カフェ",
@@ -397,11 +400,11 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
         "クレープ",
         "スイーツ"
     ]):
-        included_types = [
+        included_types.update = ([
             "cafe",
             "bakery",
             "ice_cream_shop"
-        ]
+        ])
 
     elif any(word in keyword_text for word in [
         "夜景",
@@ -411,16 +414,18 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
         "観光",
         "展望"
     ]):
-        included_types = [
+        included_types.update = ([
             "tourist_attraction",
             "park",
-        ]
+        ])
 
     else:
-        included_types = [
+        included_types.update = ([
             "restaurant",
             "cafe",
-        ]
+        ])
+
+    included_types = list(included_types)
 
 
     url = "https://places.googleapis.com/v1/places:searchNearby"

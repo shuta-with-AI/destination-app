@@ -2,13 +2,14 @@
 """
 ドライブ先提案アプリ
 ====================
-現在地・ドライブ圏内・目的（親カテゴリ一括チェック/細分化/自由入力対応）を入力すると、
+現在地・ドライブ圏内・目的（折りたたみアコーディオン/親カテゴリ一括チェック/自由入力対応）を入力すると、
 1. Gemini API で自由入力ワードをGoogle検索に最適化された類似キーワード群へ拡張
-2. Google Places API (New) で指定エリアの店舗および最新口コミを取得
-3. Google Distance Matrix API で現在地から各店舗への正確な車移動時間を計算
-4. 到着予定時刻に基づき、営業時間・閉店時間・ラストオーダー目安を算出
-5. Gemini API で口コミから代表メニュー3選＆価格を自動抽出し、ランキング化
-6. 上位10件を表示し、ナビ案内やシェア機能を提供する。
+2. 現在地から緯度経度を特定し、ドライブ圏内（半径km）で厳密にエリアフィルタリング
+3. Google Places API (New) で指定エリアの店舗および最新口コミを取得
+4. Google Distance Matrix API で現在地から各店舗への正確な車移動時間を計算
+5. 到着予定時刻に基づき、営業時間・閉店時間・ラストオーダー目安を算出
+6. Gemini API で口コミから代表メニュー3選＆価格を自動抽出し、ランキング化
+7. 上位10件を表示し、ナビ案内やシェア機能を提供する。
 """
 
 import streamlit as st
@@ -41,6 +42,7 @@ if GEMINI_API_KEY:
 
 PURPOSE_DATA = {
     "ご飯": {
+        "icon": "🍚",
         "ジャンル": {
             "ラーメン": "ラーメン 中華そば つけ麺",
             "ハンバーガー": "ハンバーガー グルメバーガー",
@@ -51,6 +53,7 @@ PURPOSE_DATA = {
         }
     },
     "スイーツ": {
+        "icon": "🍰",
         "ジャンル": {
             "アイス・ジェラート": "アイスクリーム ジェラート パフェ",
             "クレープ": "クレープ ガレット",
@@ -60,6 +63,7 @@ PURPOSE_DATA = {
         }
     },
     "景色・観光": {
+        "icon": "🏞️",
         "ジャンル": {
             "夜景・展望台": "夜景 展望台 展望デッキ",
             "海・ドライブコース": "海 沿岸 ドライブコース 砂浜",
@@ -177,9 +181,6 @@ def get_trending_by_shares(limit=10):
 # 自由入力ワードのAI拡張処理
 # ------------------------------------------------------------
 def expand_free_word_with_ai(free_word):
-    """
-    自由入力された言葉をもとに、Geminiを使ってGoogle Places検索に最適な類似・関連キーワード群を生成する
-    """
     if not client or not free_word.strip():
         return free_word
 
@@ -190,9 +191,6 @@ def expand_free_word_with_ai(free_word):
     【出力例】
     入力: エモいカフェ
     出力: 古民家カフェ レトロ喫茶 映えスイーツ 夜カフェ 雰囲気の良いカフェ
-
-    入力: 激辛
-    出力: 激辛ラーメン 韓国料理 麻婆豆腐 担々麺 アジアンエスニック
 
     入力: {free_word}
     出力:
@@ -207,6 +205,37 @@ def expand_free_word_with_ai(free_word):
         return expanded_keywords if expanded_keywords else free_word
     except Exception:
         return free_word
+
+# ------------------------------------------------------------
+# 住所から緯度経度を取得するヘルパー関数
+# ------------------------------------------------------------
+def geocode_location(location_str):
+    if "," in location_str and not any(c in location_str for c in ["県", "市", "区", "町"]):
+        try:
+            lat, lng = map(float, location_str.split(","))
+            return lat, lng
+        except Exception:
+            pass
+
+    url = "https://places.googleapis.com/v1/places:searchText"
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+        "X-Goog-FieldMask": "places.location"
+    }
+    body = {"textQuery": location_str, "maxResultCount": 1}
+
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=5)
+        if r.status_code == 200:
+            places = r.json().get("places", [])
+            if places and "location" in places[0]:
+                loc = places[0]["location"]
+                return loc.get("latitude"), loc.get("longitude")
+    except Exception:
+        pass
+
+    return None, None
 
 # ------------------------------------------------------------
 # Google Distance Matrix API 連携
@@ -341,19 +370,15 @@ def search_places_google(location_str, radius_km, search_query_keyword):
         "maxResultCount": 20
     }
 
-    if "," in location_str and not any(c in location_str for c in ["県", "市", "区", "町"]):
-        try:
-            lat_str, lng_str = location_str.split(",")
-            lat, lng = float(lat_str), float(lng_str)
-            safe_radius = min(float(radius_km * 1000), 50000.0)
-            body["locationBias"] = {
-                "circle": {
-                    "center": {"latitude": lat, "longitude": lng},
-                    "radius": safe_radius
-                }
+    lat, lng = geocode_location(location_str)
+    if lat is not None and lng is not None:
+        safe_radius = min(float(radius_km * 1000), 50000.0)
+        body["locationBias"] = {
+            "circle": {
+                "center": {"latitude": lat, "longitude": lng},
+                "radius": safe_radius
             }
-        except Exception:
-            body["textQuery"] = f"{location_str} {search_query_keyword}"
+        }
     else:
         body["textQuery"] = f"{location_str} {search_query_keyword}"
 
@@ -455,7 +480,6 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
         open_places.sort(key=lambda x: -x["rating"])
         filtered_places = open_places
 
-    # STEP 4: Gemini による口コミ分析＆人気メニュー・価格抽出
     input_list_for_gemini = [
         {
             "id": idx,
@@ -599,54 +623,49 @@ def main():
 
         st.header("③ 目的")
         
-        # 🌟 親カテゴリと子のチェックボックス連携
         selected_keywords = []
 
+        # 🌟 折りたたみアコーディオン（expander）でカテゴリごとに段差・階層構造を作成
         for category, cat_info in PURPOSE_DATA.items():
+            icon = cat_info.get("icon", "")
             genres = cat_info["ジャンル"]
             parent_key = f"parent_{category}"
 
-            # 親チェックボックスのハンドラー関数
             def on_parent_change(cat=category, g_keys=list(genres.keys())):
                 is_checked = st.session_state[f"parent_{cat}"]
                 for g_key in g_keys:
                     st.session_state[f"child_{cat}_{g_key}"] = is_checked
 
-            # 子チェックボックスのハンドラー関数
             def on_child_change(cat=category, g_keys=list(genres.keys())):
                 all_checked = all(st.session_state.get(f"child_{cat}_{g_key}", False) for g_key in g_keys)
                 st.session_state[f"parent_{cat}"] = all_checked
 
-            # 親チェックボックスの初期化
             if parent_key not in st.session_state:
                 st.session_state[parent_key] = False
 
-            # 親チェックボックス表示
-            parent_checked = st.checkbox(
-                f"**{category} (全選択)**",
-                key=parent_key,
-                on_change=on_parent_change,
-                args=(category, list(genres.keys()))
-            )
-
-            # 子チェックボックス表示
-            for genre_name, genre_keyword in genres.items():
-                child_key = f"child_{category}_{genre_name}"
-                if child_key not in st.session_state:
-                    st.session_state[child_key] = parent_checked
-
-                child_checked = st.checkbox(
-                    f"└ {genre_name}",
-                    key=child_key,
-                    on_change=on_child_change,
+            # expander を使って「大元を開くと細分化された選択肢が出る」形式にする
+            with st.expander(f"{icon} {category}"):
+                parent_checked = st.checkbox(
+                    f"**{category} (全選択)**",
+                    key=parent_key,
+                    on_change=on_parent_change,
                     args=(category, list(genres.keys()))
                 )
-                if child_checked:
-                    selected_keywords.append(genre_keyword)
 
-            st.write("")  # 余白
+                for genre_name, genre_keyword in genres.items():
+                    child_key = f"child_{category}_{genre_name}"
+                    if child_key not in st.session_state:
+                        st.session_state[child_key] = parent_checked
 
-        # 🌟 自由入力枠の導入
+                    child_checked = st.checkbox(
+                        f"└ {genre_name}",
+                        key=child_key,
+                        on_change=on_child_change,
+                        args=(category, list(genres.keys()))
+                    )
+                    if child_checked:
+                        selected_keywords.append(genre_keyword)
+
         st.subheader("🔍 フリーワード入力")
         free_word = st.text_input(
             "こだわりキーワード (任意)",
@@ -671,7 +690,6 @@ def main():
                 st.error("APIキーが未設定のため検索できません。")
             else:
                 with st.spinner("検索中..."):
-                    # 検索キーワードの統合とAIによる類似語拡張
                     combined_keywords = " ".join(selected_keywords)
                     
                     if free_word.strip():
@@ -698,14 +716,12 @@ def main():
                         with cols[0]:
                             st.subheader(r["name"])
                             
-                            # 写真リスト (最大4枚)
                             if r.get("photo_urls"):
                                 img_cols = st.columns(min(len(r["photo_urls"]), 4))
                                 for i, img_url in enumerate(r["photo_urls"][:4]):
                                     with img_cols[i]:
                                         st.image(img_url, use_container_width=True)
 
-                            # 口コミからの人気メニュー表示
                             if r.get("popular_menu"):
                                 st.write("🍽️ **おすすめ・人気メニュー**")
                                 for item in r["popular_menu"]:

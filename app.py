@@ -20,6 +20,8 @@ import hashlib
 import urllib.parse
 from google import genai
 from google.genai import types
+import google.genai
+st.write("google-genai version:", google.genai.__version__)
 
 # ------------------------------------------------------------
 # 初期設定

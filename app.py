@@ -3,10 +3,10 @@
 ドライブ先提案アプリ
 ====================
 現在地・ドライブ圏内・目的（ご飯/スイーツ/景色 等）を入力すると、
-Google Places APIで候補地を検索し、
+Gemini APIで候補地を検索し、
 - 直近1週間の口コミ増加率（自前のスナップショットDBで蓄積）
 - 評価点（足切り）
-- 予算（ホットペッパー補完）
+- 予算
 - 到着予測時刻での営業状況
 を考慮して上位10件を提案し、Googleマップへのナビ導線とシェア機能を提供する。
 """
@@ -18,7 +18,8 @@ import math
 import json
 import hashlib
 import urllib.parse
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 # ------------------------------------------------------------
 # 初期設定
@@ -29,9 +30,10 @@ DB_PATH = "drive_app_data.db"
 
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-# Gemini APIの初期設定
+# 新標準クライアントの初期化
+client = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
 PURPOSE_KEYWORDS = {
     "ご飯": "レストラン",
@@ -155,51 +157,48 @@ def navi_url(name):
     return f"https://www.google.com/maps/dir/?api=1&destination={urllib.parse.quote(name)}&travelmode=driving"
 
 # ------------------------------------------------------------
-# メイン処理（Gemini APIで一括生成）
+# メイン処理（新Gemini SDKで一括生成）
 # ------------------------------------------------------------
 def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
-    if not GEMINI_API_KEY:
+    if not client:
         st.error("GEMINI_API_KEY が読み込めていません。Secretsの設定を確認してください。")
         return []
         
     keyword = PURPOSE_KEYWORDS.get(purpose, purpose)
     
+    prompt = f"""
+    あなたはドライブ先提案アシスタントです。
+    以下の条件に合致する実在のドライブ目的地を必ず10件提案してください。
+
+    【条件】
+    - 現在地情報: {location_str}
+    - 検索半径: およそ {radius_km}km 圏内
+    - 目的: {keyword}
+    - 予算感: {budget_filter}
+    - 最低評価: {min_rating}以上
+
+    以下のJSON構造の配列のみを出力してください。
+    [
+      {{
+        "name": "店舗/施設名",
+        "address": "住所",
+        "rating": 4.5,
+        "review_count": 120,
+        "budget_name": "1000〜2000円",
+        "open_status": true,
+        "buzz_reason": "SNSやテレビで○○が映えると話題のスポット"
+      }}
+    ]
+    """
+
     try:
-        generation_config = genai.GenerationConfig(
-            response_mime_type="application/json"
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
         )
-        # 404エラー回避のため安定モデル gemini-1.5-flash に変更
-        model = genai.GenerativeModel(
-            'gemini-1.5-flash',
-            generation_config=generation_config
-        )
-        
-        prompt = f"""
-        あなたはドライブ先提案アシスタントです。
-        以下の条件に合致する実在のドライブ目的地を必ず10件提案してください。
-
-        【条件】
-        - 現在地情報: {location_str}
-        - 検索半径: およそ {radius_km}km 圏内
-        - 目的: {keyword}
-        - 予算感: {budget_filter}
-        - 最低評価: {min_rating}以上
-
-        以下のJSON構造の配列のみを出力してください。
-        [
-          {{
-            "name": "店舗/施設名",
-            "address": "住所",
-            "rating": 4.5,
-            "review_count": 120,
-            "budget_name": "1000〜2000円",
-            "open_status": true,
-            "buzz_reason": "SNSやテレビで○○が映えると話題のスポット"
-          }}
-        ]
-        """
-        
-        response = model.generate_content(prompt)
         raw_results = json.loads(response.text)
         
     except Exception as e:
@@ -264,7 +263,7 @@ def main():
 
     if not GEMINI_API_KEY:
         st.warning(
-            "Gemini APIキーが設定されていません。`.streamlit/secrets.toml` に "
+            "Gemini APIキーが設定されていません。`Secrets` に "
             "`GEMINI_API_KEY` を設定してください。"
         )
 

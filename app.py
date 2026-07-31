@@ -2,12 +2,12 @@
 """
 ドライブ先提案アプリ
 ====================
-現在地・ドライブ圏内・目的（折りたたみアコーディオン/インデント対応/自由入力対応）を入力すると、
+現在地・ドライブ圏内・目的を入力すると、
 1. Gemini API で自由入力ワードをGoogle検索に最適化された類似キーワード群へ拡張
 2. 現在地から緯度経度を特定し、ドライブ圏内（半径km）で厳密にエリアフィルタリング
-3. Google Places API (New) で指定エリアの店舗および最新口コミを取得
+3. Google Places API (New) で指定エリアの店舗および最新口コミ・写真を get
 4. Google Distance Matrix API で現在地から各店舗への正確な車移動時間を計算
-5. 到着予定時刻に基づき、営業時間・閉店時間・ラストオーダー目安を算出
+5. 到着予定時刻に基づき、閉店時間・ラストオーダー目安を算出
 6. Gemini API で口コミから代表メニュー3選＆価格を自動抽出し、ランキング化
 7. 上位10件を表示し、ナビ案内やシェア機能を提供する。
 """
@@ -19,7 +19,6 @@ import math
 import json
 import hashlib
 import urllib.parse
-import traceback
 import requests
 from google import genai
 from google.genai import types
@@ -334,7 +333,7 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
     return False, "営業時間外", "営業時間外"
 
 # ------------------------------------------------------------
-# Google Places API 検索
+# Google Places API 検索 (写真最大2枚取得)
 # ------------------------------------------------------------
 def search_places_google(location_str, radius_km, search_query_keyword):
     if not GOOGLE_MAPS_API_KEY:
@@ -394,9 +393,10 @@ def search_places_google(location_str, radius_km, search_query_keyword):
             rating = float(p.get("rating", 0.0))
             review_count = int(p.get("userRatingCount", 0))
 
+            # ★ 写真を取得 (最大2枚へ変更)
             photos_data = p.get("photos", [])
             photo_urls = []
-            for photo in photos_data[:4]:
+            for photo in photos_data[:2]:
                 photo_name = photo.get("name")
                 if photo_name:
                     url_img = f"https://places.googleapis.com/v1/{photo_name}/media?key={GOOGLE_MAPS_API_KEY}&maxHeightPx=400&maxWidthPx=400"
@@ -622,7 +622,6 @@ def main():
         
         selected_keywords = []
 
-        # 🌟 絵文字を削除＆段差インデント（c_indent/c_content）を適用
         for category, cat_info in PURPOSE_DATA.items():
             genres = cat_info["ジャンル"]
             parent_key = f"parent_{category}"
@@ -639,7 +638,6 @@ def main():
             if parent_key not in st.session_state:
                 st.session_state[parent_key] = False
 
-            # expander タイトルから絵文字を削除
             with st.expander(category):
                 parent_checked = st.checkbox(
                     f"**{category} (全選択)**",
@@ -648,17 +646,15 @@ def main():
                     args=(category, list(genres.keys()))
                 )
 
-                # 子選択肢に物理的な段差（インデント）を設定
                 for genre_name, genre_keyword in genres.items():
                     child_key = f"child_{category}_{genre_name}"
                     if child_key not in st.session_state:
                         st.session_state[child_key] = parent_checked
 
-                    # 左に少しの余白カラム（0.15）を置いて右に配置
                     c_indent, c_content = st.columns([0.15, 0.85])
                     with c_content:
                         child_checked = st.checkbox(
-                            genre_name,  # 「└ 」を削除
+                            genre_name,
                             key=child_key,
                             on_change=on_child_change,
                             args=(category, list(genres.keys()))
@@ -716,12 +712,14 @@ def main():
                         with cols[0]:
                             st.subheader(r["name"])
                             
+                            # ★ 写真リストの表示 (2枚固定)
                             if r.get("photo_urls"):
-                                img_cols = st.columns(min(len(r["photo_urls"]), 4))
-                                for i, img_url in enumerate(r["photo_urls"][:4]):
+                                img_cols = st.columns(min(len(r["photo_urls"]), 2))
+                                for i, img_url in enumerate(r["photo_urls"][:2]):
                                     with img_cols[i]:
                                         st.image(img_url, use_container_width=True)
 
+                            # ★ メニュー情報の表示
                             if r.get("popular_menu"):
                                 st.write("🍽️ **おすすめ・人気メニュー**")
                                 for item in r["popular_menu"]:
@@ -734,9 +732,9 @@ def main():
                             if r["budget_name"]:
                                 st.write(f"💰 予算目安: {r['budget_name']}")
                             
-                            time_info = f"車で約{r['drive_time_min']}分" if r["drive_time_min"] is not None else "到着予定"
+                            # ★ 「営業中の見込み」などを削除し、シンプルな表示に修正
                             st.write(
-                                f"🕒 到着予定: {r['arrival_dt'].strftime('%H:%M')} （{time_info} / 営業中の見込み）"
+                                f"🕒 到着予定: **{r['arrival_dt'].strftime('%H:%M')}**"
                             )
                             st.write(
                                 f"⏳ 閉店時間: **{r['closing_time_str']}**（ラストオーダー：**{r['last_order_str']}**）"

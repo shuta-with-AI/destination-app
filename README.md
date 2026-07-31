@@ -13,12 +13,10 @@
    ```
    `.streamlit/secrets.toml` を開いて、実際のAPIキーを入力してください。
 
-   - **GOOGLE_MAPS_API_KEY(必須)**: Google Cloud Platformで以下を有効化して取得
-     - Places API
-     - Geocoding API
-   - **HOTPEPPER_API_KEY(任意)**: リクルートWebサービスで取得。無くても動きますが予算情報が出ません。
-   - **GEMINI_API_KEY(任意)**: Google AI Studioで取得。無くても動きますが「話題の理由」が出ません。
-
+   - **GOOGLE_MAPS_API_KEY(必須)**: Google Cloud Consoleで以下を有効化して取得
+   - Places API (New) または Places API
+   - **GEMINI_API_KEY(必須)**: Google AI Studioで取得
+   - ※検索結果の厳選、ランキング化、予算感の推測、おすすめ理由の生成を行う中核機能として必須になります。
 3. 起動
    ```
    streamlit run app.py

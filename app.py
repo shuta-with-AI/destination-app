@@ -2,7 +2,7 @@
 """
 ドライブ先提案アプリ
 ====================
-現在地・ドライブ圏内・目的を入力すると、
+現在地・ドライブ圏内・目的（細分化チェックボックス対応）を入力すると、
 1. Google Places API (New) で指定エリアの店舗および最新口コミを取得
 2. Google Distance Matrix API で現在地から各店舗への正確な車移動時間を計算
 3. 店舗ごとに異なる到着予定時刻に基づき、営業状況（24時間・深夜営業対応）を判定
@@ -38,12 +38,38 @@ client = None
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ★ 深夜でもラーメン屋や牛丼屋、深夜食堂がヒットするように検索ワードを強化
-PURPOSE_KEYWORDS = {
-    "ご飯": "レストラン グルメ ラーメン 牛丼 居酒屋 深夜営業 食事",
-    "スイーツ": "スイーツ カフェ 夜カフェ",
-    "パン": "パン屋 ベーカリー",
-    "景色": "絶景 展望 景色 観光スポット 夜景",
+# 目的の細分化データ構造
+PURPOSE_DATA = {
+    "ご飯": {
+        "デフォルト": "レストラン グルメ ラーメン 牛丼 居酒屋 深夜営業 食事",
+        "ジャンル": {
+            "ラーメン": "ラーメン 中華そば つけ麺",
+            "ハンバーガー": "ハンバーガー グルメバーガー",
+            "レストラン・洋食": "レストラン 洋食 ハンバーグ",
+            "和食・定食": "定食 和食 食堂",
+            "居酒屋・深夜食堂": "居酒屋 深夜営業 居酒屋",
+            "焼肉・肉料理": "焼肉 肉料理 ステーキ",
+        }
+    },
+    "スイーツ": {
+        "デフォルト": "スイーツ カフェ 夜カフェ",
+        "ジャンル": {
+            "アイス・ジェラート": "アイスクリーム ジェラート パフェ",
+            "クレープ": "クレープ ガレット",
+            "アサイーボウル": "アサイーボウル スムージー カフェ",
+            "ケーキ・パフェ": "ケーキ パフェ 喫茶店",
+            "パン・パン屋": "パン屋 ベーカリー カフェ",
+        }
+    },
+    "景色・観光": {
+        "デフォルト": "絶景 展望 景色 観光スポット 夜景",
+        "ジャンル": {
+            "夜景・展望台": "夜景 展望台 展望デッキ",
+            "海・ドライブコース": "海 沿岸 ドライブコース 砂浜",
+            "山・自然・公園": "山 自然 公園 渓谷",
+            "道の駅・ドライブイン": "道の駅 ドライブイン 観光施設",
+        }
+    }
 }
 
 RANGE_OPTIONS = {
@@ -206,7 +232,6 @@ def check_open_at_time(regular_opening_hours, open_now_fallback, arrival_dt):
 
     periods = regular_opening_hours.get("periods", [])
     
-    # 24時間営業判定
     if len(periods) == 1:
         op = periods[0].get("open", {})
         if op.get("day") == 0 and op.get("hour") == 0 and op.get("minute") == 0 and "close" not in periods[0]:
@@ -242,7 +267,7 @@ def check_open_at_time(regular_opening_hours, open_now_fallback, arrival_dt):
 # ------------------------------------------------------------
 # Google Places API 検索 (写真・口コミ取得)
 # ------------------------------------------------------------
-def search_places_google(location_str, radius_km, purpose):
+def search_places_google(location_str, radius_km, search_query_keyword):
     if not GOOGLE_MAPS_API_KEY:
         st.error("GOOGLE_MAPS_API_KEY が未設定です。")
         return []
@@ -263,14 +288,12 @@ def search_places_google(location_str, radius_km, purpose):
             "places.googleMapsUri,"
             "places.location,"
             "places.photos,"
-            "places.reviews"  # ★ アプローチ1用：口コミテキストを取得
+            "places.reviews"
         ),
     }
 
-    keyword = PURPOSE_KEYWORDS.get(purpose, purpose)
-
     body = {
-        "textQuery": f"{keyword}",
+        "textQuery": f"{search_query_keyword}",
         "pageSize": 20,
         "maxResultCount": 20
     }
@@ -287,9 +310,9 @@ def search_places_google(location_str, radius_km, purpose):
                 }
             }
         except Exception:
-            body["textQuery"] = f"{location_str} {keyword}"
+            body["textQuery"] = f"{location_str} {search_query_keyword}"
     else:
-        body["textQuery"] = f"{location_str} {keyword}"
+        body["textQuery"] = f"{location_str} {search_query_keyword}"
 
     try:
         r = requests.post(url, headers=headers, json=body, timeout=8)
@@ -306,7 +329,6 @@ def search_places_google(location_str, radius_km, purpose):
             rating = float(p.get("rating", 0.0))
             review_count = int(p.get("userRatingCount", 0))
 
-            # 写真URL取得 (最大4枚)
             photos_data = p.get("photos", [])
             photo_urls = []
             for photo in photos_data[:4]:
@@ -315,7 +337,6 @@ def search_places_google(location_str, radius_km, purpose):
                     url_img = f"https://places.googleapis.com/v1/{photo_name}/media?key={GOOGLE_MAPS_API_KEY}&maxHeightPx=400&maxWidthPx=400"
                     photo_urls.append(url_img)
 
-            # ★ 口コミテキストの抽出 (上位5件)
             reviews = p.get("reviews", [])
             review_texts = []
             for rev in reviews[:5]:
@@ -334,7 +355,7 @@ def search_places_google(location_str, radius_km, purpose):
                 "open_now_fallback": p.get("currentOpeningHours", {}).get("openNow"),
                 "location": p.get("location"),
                 "photo_urls": photo_urls,
-                "review_texts": " / ".join(review_texts)  # 口コミを結合して格納
+                "review_texts": " / ".join(review_texts)
             })
 
         return places
@@ -346,7 +367,7 @@ def search_places_google(location_str, radius_km, purpose):
 # ------------------------------------------------------------
 # メイン検索処理
 # ------------------------------------------------------------
-def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
+def run_search(location_str, radius_km, search_query_keyword, main_purpose_label, budget_filter, min_rating):
     if not client:
         st.error("GEMINI_API_KEY が読み込めていません。Secretsの設定を確認してください。")
         return []
@@ -354,7 +375,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     now = datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
 
     # STEP 1: Google Places API から候補店舗を検索
-    raw_places = search_places_google(location_str, radius_km, purpose)
+    raw_places = search_places_google(location_str, radius_km, search_query_keyword)
     if not raw_places:
         return []
 
@@ -385,13 +406,12 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     if not open_places:
         return []
 
-    # 10件確保のための自動補正
     filtered_places = [p for p in open_places if p["rating"] >= min_rating]
     if len(filtered_places) < 10:
         open_places.sort(key=lambda x: -x["rating"])
         filtered_places = open_places
 
-    # STEP 4: Gemini に評価・ランキング・おすすめ理由・【口コミからの人気メニュー抽出】を行わせる
+    # STEP 4: Gemini に評価・ランキング・おすすめ理由・口コミからの人気メニュー抽出を行わせる
     input_list_for_gemini = [
         {
             "id": idx,
@@ -399,7 +419,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
             "rating": p["rating"],
             "review_count": p["review_count"],
             "address": p["address"],
-            "reviews": p["review_texts"]  # 口コミデータも渡す
+            "reviews": p["review_texts"]
         }
         for idx, p in enumerate(filtered_places)
     ]
@@ -410,7 +430,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     おすすめ順（ランキング順）に並び替えてJSONで出力してください。
 
     【検索条件】
-    - 目的: {purpose}
+    - 目的: {main_purpose_label} ({search_query_keyword})
     - 予算感の指定: {budget_filter}
 
     【営業中の店舗リスト】
@@ -418,7 +438,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
 
     【出力ルール】
     - 入力リストに存在する店舗のみを使ってください（架空の店舗を捏造しないでください）。
-    - 提供された「reviews (口コミ)」のテキストを分析し、その店舗で人気の具体的メニュー名や商品名（できれば口コミ内の価格も）を「popular_menu」として最大3つ抽出してください。口コミに具体的なメニューがない場合は、店名やジャンルから代表メニューを推測して補完してください。
+    - 提供された「reviews (口コミ)」のテキストを分析し、その店舗で人気の具体的メニュー名や商品名（できれば口コミ内の価格も）を「popular_menu」として最大3つ抽出してください。
     - 各店舗について、予算目安（例: 1000〜2000円）と、ドライブで訪れるべき魅力を簡潔な「buzz_reason」として作成してください。
     - 以下のJSON配列フォーマットのみを出力してください。
 
@@ -426,8 +446,8 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
       {{
         "id": 0,
         "budget_name": "1000〜2000円",
-        "popular_menu": ["濃厚とんこつラーメン (850円)", "黒豚餃子 (450円)", "替玉 (150円)"],
-        "buzz_reason": "深夜まで行列ができる地元の人気ラーメン店です！"
+        "popular_menu": ["人気メニューA (850円)", "人気メニューB (450円)"],
+        "buzz_reason": "地元で大人気のスポットです！"
       }}
     ]
     """
@@ -478,7 +498,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
             "maps_url": base_info["maps_url"],
             "buzz_reason": item.get("buzz_reason", "話題の注目スポットです！"),
             "photo_urls": base_info.get("photo_urls", []),
-            "popular_menu": item.get("popular_menu", []),  # 口コミから抽出された人気メニュー
+            "popular_menu": item.get("popular_menu", []),
         })
 
     return candidates
@@ -533,7 +553,23 @@ def main():
             radius_km = RANGE_OPTIONS[range_label]
 
         st.header("③ 目的")
-        purpose = st.selectbox("何を探す?", list(PURPOSE_KEYWORDS.keys()))
+        main_purpose = st.selectbox("カテゴリを選択", list(PURPOSE_DATA.keys()))
+
+        # ★ 選択されたカテゴリに応じて細分化チェックボックスを表示
+        selected_genres = []
+        genre_dict = PURPOSE_DATA[main_purpose]["ジャンル"]
+        
+        st.markdown("**さらに絞り込む (複数選択可)**")
+        for genre_name in genre_dict.keys():
+            if st.checkbox(genre_name, key=f"chk_{main_purpose}_{genre_name}"):
+                selected_genres.append(genre_name)
+
+        # 検索キーワードの構築
+        if selected_genres:
+            keywords_list = [genre_dict[g] for g in selected_genres]
+            search_query_keyword = " ".join(keywords_list)
+        else:
+            search_query_keyword = PURPOSE_DATA[main_purpose]["デフォルト"]
 
         st.header("④ 条件")
         min_rating = st.slider("最低評価", 1.0, 5.0, 3.5, 0.1)
@@ -553,7 +589,14 @@ def main():
                 st.error("APIキーが未設定のため検索できません。")
             else:
                 with st.spinner("検索中..."):
-                    results = run_search(location_str, radius_km, purpose, budget_filter, min_rating)
+                    results = run_search(
+                        location_str,
+                        radius_km,
+                        search_query_keyword,
+                        main_purpose,
+                        budget_filter,
+                        min_rating
+                    )
 
                 if not results:
                     st.info("条件に合う営業中のスポットが見つかりませんでした。目的を変更するか、検索範囲を広げて再試行してください。")
@@ -571,7 +614,7 @@ def main():
                                     with img_cols[i]:
                                         st.image(img_url, use_container_width=True)
 
-                            # ★ 口コミからAIが抽出した人気メニューの表示
+                            # 口コミからAIが抽出した人気メニューの表示
                             if r.get("popular_menu"):
                                 st.write("🍽️ **AIが口コミから見つけた人気メニュー**")
                                 for item in r["popular_menu"]:

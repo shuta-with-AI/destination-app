@@ -358,6 +358,8 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
 # ------------------------------------------------------------
 def search_places_google(location_str, radius_km, search_query_keyword, selected_keywords):
 
+    keyword_text = search_query_keyword
+
     if not GOOGLE_MAPS_API_KEY:
         st.error("GOOGLE_MAPS_API_KEY が未設定です。")
         return []
@@ -520,22 +522,33 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
                 ]):
                     continue
 
-                if any(x in keyword_text for x in [
-                    "スイーツ",
-                    "アイス",
-                    "ケーキ",
-                    "クレープ"
-                ]):
-
+            if any(x in keyword_text for x in [
+                "スイーツ",
+                "アイス",
+                "ケーキ",
+                "クレープ"
+            ]):
                 if not any(x in name_check for x in [
                     "カフェ",
                     "ケーキ",
                     "菓子",
                     "スイーツ",
                     "ジェラート",
-                    "アイス"
+                    "アイス",
+                    "クレープ",
+                    "パン",
+                    "ベーカリー"
                 ]):
                     continue
+
+            if any(x in name_check.lower() for x in [
+                "ホテル",
+                "hotel",
+                "旅館",
+                "宿"
+            ]):
+                continue
+
 
             rating = float(
                 p.get(

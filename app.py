@@ -32,7 +32,7 @@ import math
 # ------------------------------------------------------------
 # 初期設定
 # ------------------------------------------------------------
-st.set_page_config(page_title="ドライブ先提案アプリ", page_icon="🚗", layout="wide")
+st.set_page_config(page_title="目的地ここに決めた！", page_icon="🚗", layout="wide")
 
 DB_PATH = "drive_app_data.db"
 
@@ -44,9 +44,7 @@ PURPOSE_KEYWORDS = {
     "ご飯": "レストラン",
     "スイーツ": "スイーツ カフェ",
     "パン": "パン屋",
-    "景色（山）": "展望台 山 景色",
-    "景色（海）": "海 景色 絶景",
-    "景色（川）": "川 景色 絶景",
+    "景色": "絶景 展望 景色",
 }
 
 RANGE_OPTIONS = {
@@ -357,6 +355,10 @@ def run_search(lat, lng, radius_km, purpose, budget_filter, min_rating):
         # 予算(ホットペッパーで補完)
         budget_name = hotpepper_budget_lookup(name, lat, lng)
 
+        # 増加率データが無い間の暫定スコア(評価点 + log10(口コミ数))
+        # 口コミ数をそのまま使うと件数の多い店が支配してしまうため、対数で緩やかにしている
+        fallback_score = round(rating + math.log10(review_count + 1), 3)
+
         candidates.append(
             {
                 "place_id": place_id,
@@ -364,6 +366,7 @@ def run_search(lat, lng, radius_km, purpose, budget_filter, min_rating):
                 "rating": rating,
                 "review_count": review_count,
                 "buzz_rate": buzz_rate,
+                "fallback_score": fallback_score,
                 "price_level": price_level,
                 "budget_name": budget_name,
                 "lat": p_lat,
@@ -374,9 +377,14 @@ def run_search(lat, lng, radius_km, purpose, budget_filter, min_rating):
             }
         )
 
-    # 増加率がある店を優先、無い店("データ蓄積中")は末尾に回す
+    # 増加率データがある店はその値で優先順位を決め、
+    # まだ無い店(データ蓄積中)は暫定スコア(評価+口コミ数)で並べる
     candidates.sort(
-        key=lambda x: (x["buzz_rate"] is None, -(x["buzz_rate"] or 0))
+        key=lambda x: (
+            x["buzz_rate"] is None,
+            -(x["buzz_rate"] or 0),
+            -x["fallback_score"],
+        )
     )
     return candidates[:10]
 
@@ -461,7 +469,11 @@ def main():
                             st.write(f"📍 {r['address']}")
                             st.write(f"⭐ 評価: {r['rating']} ({r['review_count']}件)")
                             if r["buzz_rate"] is None:
-                                st.write("📈 口コミ増加率: データ蓄積中(1週間分のデータが必要です)")
+                                st.write(
+                                    "📈 口コミ増加率: データ蓄積中(1週間分のデータが必要です)"
+                                    f" ／ 現時点の暫定スコア: {r['fallback_score']}"
+                                    "(評価点と口コミ数から算出。増加率データが揃い次第そちらに切り替わります)"
+                                )
                             else:
                                 st.write(f"📈 口コミ増加率(直近1週間): {r['buzz_rate']}%")
                             if r["budget_name"]:

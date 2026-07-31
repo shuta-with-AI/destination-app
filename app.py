@@ -235,7 +235,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-flash-latest",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"

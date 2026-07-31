@@ -157,14 +157,6 @@ def estimate_arrival(distance_km, avg_speed_kmh=30):
     hours = distance_km / avg_speed_kmh
     return now + datetime.timedelta(hours=hours)
 
-# ------------------------------------------------------------
-# 到着時刻の判定 & Google Places API連携
-# ------------------------------------------------------------
-def estimate_arrival(distance_km, avg_speed_kmh=30):
-    now = datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
-    hours = distance_km / avg_speed_kmh
-    return now + datetime.timedelta(hours=hours)
-
 def check_open_at_time(regular_opening_hours, arrival_dt):
     """
     到着予定時刻(arrival_dt)に営業しているかを判定する
@@ -216,7 +208,7 @@ def get_place_info(query):
             "places.formattedAddress,"
             "places.rating,"
             "places.userRatingCount,"
-            "places.regularOpeningHours,"  # ★ 週間営業スケジュールを取得
+            "places.regularOpeningHours,"  # 週間営業スケジュール
             "places.googleMapsUri"
         ),
     }
@@ -241,7 +233,7 @@ def get_place_info(query):
             "address": p.get("formattedAddress", ""),
             "rating": p.get("rating", 0.0),
             "review_count": p.get("userRatingCount", 0),
-            "regular_opening_hours": p.get("regularOpeningHours"),  # ★ 営業時間データを追加
+            "regular_opening_hours": p.get("regularOpeningHours"),
             "maps_url": p.get("googleMapsUri", f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(query)}")
         }
     except Exception:
@@ -257,9 +249,10 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         
     keyword = PURPOSE_KEYWORDS.get(purpose, purpose)
     
+    # 営業中の店舗のみで10件確保するため、Geminiには多め(15~20件)に候補を出させる
     prompt = f"""
     あなたはドライブ先提案アシスタントです。
-    以下の条件に合致する実在のドライブ目的地を必ず10件提案してください。
+    以下の条件に合致する実在のドライブ目的地を15〜20件提案してください。
 
     【条件】
     - 現在地情報: {location_str}
@@ -297,28 +290,27 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
 
     candidates = []
     for place in raw_results:
-        # Google Places APIから最新の正確な情報を取得
         google = get_place_info(place.get("name", ""))
         
+        # Google Places APIから情報が取れない場合はスキップ
+        if google is None:
+            continue
+
         dist = radius_km / 2
         arrival_dt = estimate_arrival(dist)
 
-        # Google Places APIが有効でない・検索失敗時はフォールバック処理
-        if google is None:
-            name = place.get("name", "不明な店舗")
-            rating = 4.0
-            review_count = 100
-            address = "住所情報なし"
-            open_status = None  # ★ フォールバック時は「不明」にする
-            maps_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(name)}"
-        else:
-            name = google["name"]
-            rating = float(google["rating"])
-            review_count = int(google["review_count"])
-            address = google["address"]
-            maps_url = google["maps_url"]
-            # ★ 到着予定時刻における営業判定を実施
-            open_status = check_open_at_time(google["regular_opening_hours"], arrival_dt)
+        # 到着予定時刻における営業判定を実施
+        open_status = check_open_at_time(google["regular_opening_hours"], arrival_dt)
+
+        # ★ 営業中(True)であることが確認できた店舗のみ残す（不明・営業時間外は除外）
+        if open_status is not True:
+            continue
+
+        name = google["name"]
+        rating = float(google["rating"])
+        review_count = int(google["review_count"])
+        address = google["address"]
+        maps_url = google["maps_url"]
 
         place_id = hashlib.md5(name.encode()).hexdigest()
 
@@ -344,6 +336,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
             }
         )
 
+    # 人気順・評価順にソート
     candidates.sort(
         key=lambda x: (
             x["buzz_rate"] is None,
@@ -351,8 +344,9 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
             -x["fallback_score"],
         )
     )
+    # 営業中の上位10件を返す
     return candidates[:10]
-    
+
 # ------------------------------------------------------------
 # UI
 # ------------------------------------------------------------
@@ -376,11 +370,14 @@ def main():
             try:
                 from streamlit_geolocation import streamlit_geolocation
 
+                st.info("💡 ボタンを押してブラウザの位置情報利用を許可してください。")
                 loc = streamlit_geolocation()
-                if loc and loc.get("latitude"):
+                if loc and loc.get("latitude") and loc.get("longitude"):
                     lat, lng = loc["latitude"], loc["longitude"]
                     location_str = f"緯度:{lat:.4f}, 経度:{lng:.4f}"
                     st.success(f"取得成功: {lat:.4f}, {lng:.4f}")
+                else:
+                    st.warning("位置情報がまだ取得できていません。「住所を入力」もお試しください。")
             except ImportError:
                 st.error(
                     "`pip install streamlit-geolocation` が必要です。"
@@ -414,16 +411,16 @@ def main():
 
     with tab1:
         if search_clicked:
-            if location_str == "":
-                st.error("現在地が取得できていません。左側で位置情報を設定してください。")
+            if not location_str:
+                st.error("現在地が取得できていません。左側の設定で現在地（住所または自動取得）を指定してください。")
             elif not GEMINI_API_KEY:
                 st.error("Gemini APIキーが未設定のため検索できません。")
             else:
-                with st.spinner("候補地を検索中..."):
+                with st.spinner("到着時に営業中の候補地を検索中..."):
                     results = run_search(location_str, radius_km, purpose, budget_filter, min_rating)
 
                 if not results:
-                    st.info("条件に合う候補が見つかりませんでした。条件を緩めて再検索してください。")
+                    st.info("到着予定時刻に営業しているスポットが見つかりませんでした。時間帯や検索範囲を変更して再検索してください。")
 
                 for r in results:
                     with st.container(border=True):
@@ -437,8 +434,7 @@ def main():
                             if r["budget_name"]:
                                 st.write(f"💰 予算目安: {r['budget_name']}")
                             st.write(
-                                f"🕒 到着予定: {r['arrival_dt'].strftime('%H:%M')} "
-                                f"（{'営業中の見込み' if r['open_status'] else '営業状況不明'}）"
+                                f"🕒 到着予定: {r['arrival_dt'].strftime('%H:%M')} （営業中）"
                             )
                             st.caption(f"💬 {r['buzz_reason']}")
 

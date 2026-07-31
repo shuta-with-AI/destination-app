@@ -9,18 +9,6 @@ Google Places APIで候補地を検索し、
 - 予算（ホットペッパー補完）
 - 到着予測時刻での営業状況
 を考慮して上位10件を提案し、Googleマップへのナビ導線とシェア機能を提供する。
-
-【重要な制約（実装前に必ず読んでください)】
-1. ホットペッパーAPIは検索半径が最大3kmまでしかないため、
-   メインの検索はGoogle Places APIを使用し、ホットペッパーは
-   「店名が一致した場合に予算情報を補う」用途にのみ使っています。
-2. 「1週間前との口コミ増加率」は、このアプリ自身が毎日スナップショットを
-   記録して初めて計算できます。運用開始から7日間はデータが無いため
-   「データ蓄積中」と表示されます（過去のデータを遡って取得することは
-   Google Places APIではできません)。
-3. ローカルのSQLiteファイルにデータを貯めるため、Streamlit Cloud等の
-   無料枠ではデプロイのたびにデータが消える場合があります。本番運用する
-   場合は外部DB（Supabase, Firestore等）への差し替えを推奨します。
 """
 
 import streamlit as st
@@ -157,24 +145,6 @@ def get_trending_by_shares(limit=10):
     return rows
 
 # ------------------------------------------------------------
-# Gemini + Google検索連携（バズり理由の要約）
-# ------------------------------------------------------------
-def get_buzz_reason_gemini(place_name, area_name):
-    if not GEMINI_API_KEY:
-        return "（Gemini APIキー未設定のため理由の取得はスキップされました)"
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        prompt = (
-            f"「{area_name}」にある「{place_name}」について、直近1週間以内でSNS(Instagram, TikTok)や"
-            f"ニュース記事で話題になっている理由を、分かっていれば日本語で1文（40文字以内）で簡潔に述べてください。"
-            f"特に話題性の情報が見つからない場合は「特に話題の情報は見つかりませんでした」とだけ答えてください。"
-        )
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        return f"（バズり理由の取得に失敗: {e}）"
-
-# ------------------------------------------------------------
 # 到着時刻の判定
 # ------------------------------------------------------------
 def estimate_arrival(distance_km, avg_speed_kmh=30):
@@ -182,24 +152,25 @@ def estimate_arrival(distance_km, avg_speed_kmh=30):
     return datetime.datetime.now() + datetime.timedelta(hours=hours)
 
 def navi_url(name):
-    return f"[https://www.google.com/maps/dir/?api=1&destination=](https://www.google.com/maps/dir/?api=1&destination=){urllib.parse.quote(name)}&travelmode=driving"
+    return f"https://www.google.com/maps/dir/?api=1&destination={urllib.parse.quote(name)}&travelmode=driving"
 
 # ------------------------------------------------------------
-# メイン処理（Gemini APIで候補店舗を出力）
+# メイン処理（Gemini APIで一括生成）
 # ------------------------------------------------------------
 def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     if not GEMINI_API_KEY:
+        st.error("GEMINI_API_KEY が読み込めていません。Secretsの設定を確認してください。")
         return []
         
     keyword = PURPOSE_KEYWORDS.get(purpose, purpose)
     
     try:
-        # 強制的にJSON形式でレスポンスを返させる設定
         generation_config = genai.GenerationConfig(
             response_mime_type="application/json"
         )
+        # 404エラー回避のため安定モデル gemini-2.5-flash に変更
         model = genai.GenerativeModel(
-            'gemini-1.5-flash',
+            'gemini-2.5-flash',
             generation_config=generation_config
         )
         
@@ -222,7 +193,8 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
             "rating": 4.5,
             "review_count": 120,
             "budget_name": "1000〜2000円",
-            "open_status": true
+            "open_status": true,
+            "buzz_reason": "SNSやテレビで○○が映えると話題のスポット"
           }}
         ]
         """
@@ -269,6 +241,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
                 "arrival_dt": arrival_dt,
                 "open_status": place.get("open_status", True),
                 "address": place.get("address", ""),
+                "buzz_reason": place.get("buzz_reason", "話題の注目スポットです！"),
             }
         )
 
@@ -374,10 +347,7 @@ def main():
                                 f"🕒 到着予定: {r['arrival_dt'].strftime('%H:%M')} "
                                 f"（{'営業中の見込み' if r['open_status'] else '営業状況不明'}）"
                             )
-
-                            with st.spinner("話題の理由を確認中..."):
-                                reason = get_buzz_reason_gemini(r["name"], location_str)
-                            st.caption(f"💬 {reason}")
+                            st.caption(f"💬 {r['buzz_reason']}")
 
                         with cols[1]:
                             st.link_button(

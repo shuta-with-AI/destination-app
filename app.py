@@ -3,8 +3,7 @@
 ドライブ先提案アプリ
 ====================
 現在地・ドライブ圏内・目的（ご飯/スイーツ/景色 等）を入力すると、
-Gemini APIで候補地を検索し、
-- 直近1週間の口コミ増加率（自前のスナップショットDBで蓄積）
+Gemini APIで候補地を検索し、Google Places APIで詳細情報を補完して、
 - 評価点（足切り）
 - 予算
 - 到着予測時刻での営業状況
@@ -19,9 +18,9 @@ import json
 import hashlib
 import urllib.parse
 import traceback
+import requests
 from google import genai
 from google.genai import types
-import google.genai
 from zoneinfo import ZoneInfo
 
 # ------------------------------------------------------------
@@ -32,12 +31,12 @@ st.set_page_config(page_title="ドライブ先提案アプリ", page_icon="🚗"
 DB_PATH = "drive_app_data.db"
 
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+GOOGLE_MAPS_API_KEY = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
 
 # 新標準クライアントの初期化
 client = None
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
-    
 
 PURPOSE_KEYWORDS = {
     "ご飯": "レストラン",
@@ -151,18 +150,60 @@ def get_trending_by_shares(limit=10):
     return rows
 
 # ------------------------------------------------------------
-# 到着時刻の判定
+# 到着時刻の判定 & Google Places API連携
 # ------------------------------------------------------------
 def estimate_arrival(distance_km, avg_speed_kmh=30):
     now = datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
     hours = distance_km / avg_speed_kmh
     return now + datetime.timedelta(hours=hours)
-    
-def navi_url(name):
-    return f"https://www.google.com/maps/dir/?api=1&destination={urllib.parse.quote(name)}&travelmode=driving"
+
+def get_place_info(query):
+    if not GOOGLE_MAPS_API_KEY:
+        return None
+
+    url = "https://places.googleapis.com/v1/places:searchText"
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+        "X-Goog-FieldMask": (
+            "places.displayName,"
+            "places.formattedAddress,"
+            "places.rating,"
+            "places.userRatingCount,"
+            "places.currentOpeningHours.openNow,"
+            "places.googleMapsUri"
+        ),
+    }
+
+    body = {
+        "textQuery": query
+    }
+
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=5)
+        if r.status_code != 200:
+            return None
+
+        data = r.json()
+        if "places" not in data or not data["places"]:
+            return None
+
+        p = data["places"][0]
+
+        return {
+            "name": p.get("displayName", {}).get("text", query),
+            "address": p.get("formattedAddress", ""),
+            "rating": p.get("rating", 0.0),
+            "review_count": p.get("userRatingCount", 0),
+            "open_status": p.get("currentOpeningHours", {}).get("openNow", False),
+            "maps_url": p.get("googleMapsUri", f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(query)}")
+        }
+    except Exception:
+        return None
 
 # ------------------------------------------------------------
-# メイン処理（新Gemini SDKで一括生成）
+# メイン処理（Gemini API + Google Places APIで連携生成）
 # ------------------------------------------------------------
 def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     if not client:
@@ -185,20 +226,16 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     以下のJSON構造の配列のみを出力してください。
     [
       {{
-        "name": "店舗/施設名",
-        "address": "住所",
-        "rating": 4.5,
-        "review_count": 120,
+        "name": "店舗名",
         "budget_name": "1000〜2000円",
-        "open_status": true,
-        "buzz_reason": "SNSやテレビで○○が映えると話題のスポット"
+        "buzz_reason": "SNSやテレビで話題のスポット"  
       }}
     ]
     """
 
     try:
         response = client.models.generate_content(
-            model="gemini-flash-latest",
+            model="gemini-1.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"
@@ -208,25 +245,33 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         raw_results = json.loads(response.text)
 
     except Exception as e:
-        st.error(type(e))
+        st.error(f"エラーが発生しました: {type(e)}")
         st.error(str(e))
         st.code(traceback.format_exc())
         return []
 
     candidates = []
     for place in raw_results:
-        name = place.get("name", "不明な店舗")
-        place_id = hashlib.md5(name.encode()).hexdigest()
+        # Google Places APIから最新の正確な情報を取得
+        google = get_place_info(place.get("name", ""))
         
-        try:
-            rating = float(place.get("rating", 4.0))
-        except (ValueError, TypeError):
+        # Google Places APIが有効でない・検索失敗時はフォールバック処理
+        if google is None:
+            name = place.get("name", "不明な店舗")
             rating = 4.0
-            
-        try:
-            review_count = int(place.get("review_count", 100))
-        except (ValueError, TypeError):
             review_count = 100
+            address = "住所情報なし"
+            open_status = True
+            maps_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(name)}"
+        else:
+            name = google["name"]
+            rating = float(google["rating"])
+            review_count = int(google["review_count"])
+            address = google["address"]
+            open_status = google["open_status"]
+            maps_url = google["maps_url"]
+
+        place_id = hashlib.md5(name.encode()).hexdigest()
 
         save_snapshot(place_id, name, review_count, rating)
         buzz_rate = get_buzz_rate(place_id, review_count)
@@ -246,8 +291,9 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
                 "fallback_score": fallback_score,
                 "budget_name": place.get("budget_name", ""),
                 "arrival_dt": arrival_dt,
-                "open_status": place.get("open_status", True),
-                "address": place.get("address", ""),
+                "open_status": open_status,
+                "address": address,
+                "maps_url": maps_url,
                 "buzz_reason": place.get("buzz_reason", "話題の注目スポットです！"),
             }
         )
@@ -338,16 +384,10 @@ def main():
                         cols = st.columns([3, 1])
                         with cols[0]:
                             st.subheader(r["name"])
-                            st.write(f"📍 {r['address']}")
+                            if r["address"]:
+                                st.write(f"📍 {r['address']}")
                             st.write(f"⭐ 評価: {r['rating']} ({r['review_count']}件)")
-                            if r["buzz_rate"] is None:
-                                st.write(
-                                    "📈 口コミ増加率: データ蓄積中(1週間分のデータが必要です)"
-                                    f" ／ 現時点の暫定スコア: {r['fallback_score']} "
-                                    "(評価点と口コミ数から算出。増加率データが揃い次第そちらに切り替わります)"
-                                )
-                            else:
-                                st.write(f"📈 口コミ増加率(直近1週間): {r['buzz_rate']}%")
+                            
                             if r["budget_name"]:
                                 st.write(f"💰 予算目安: {r['budget_name']}")
                             st.write(
@@ -358,7 +398,9 @@ def main():
 
                         with cols[1]:
                             st.link_button(
-                                "🗺️ ナビ開始", navi_url(r["name"]), use_container_width=True
+                                "🗺️ ナビ開始",
+                                r["maps_url"],
+                                use_container_width=True
                             )
                             if st.button("📤 シェア", key=f"share_{r['place_id']}", use_container_width=True):
                                 log_share(r["place_id"], r["name"])

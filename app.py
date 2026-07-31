@@ -157,6 +157,51 @@ def estimate_arrival(distance_km, avg_speed_kmh=30):
     hours = distance_km / avg_speed_kmh
     return now + datetime.timedelta(hours=hours)
 
+# ------------------------------------------------------------
+# 到着時刻の判定 & Google Places API連携
+# ------------------------------------------------------------
+def estimate_arrival(distance_km, avg_speed_kmh=30):
+    now = datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
+    hours = distance_km / avg_speed_kmh
+    return now + datetime.timedelta(hours=hours)
+
+def check_open_at_time(regular_opening_hours, arrival_dt):
+    """
+    到着予定時刻(arrival_dt)に営業しているかを判定する
+    戻り値: True(営業中), False(営業時間外), None(データなし・判定不能)
+    """
+    if not regular_opening_hours or "periods" not in regular_opening_hours:
+        return None  # 営業時間データがない場合
+
+    # Google APIの曜日: SUN=0, MON=1, TUE=2, WED=3, THU=4, FRI=5, SAT=6
+    # Pythonの weekday(): MON=0, TUE=1, WED=2, THU=3, FRI=4, SAT=5, SUN=6
+    python_weekday = arrival_dt.weekday()
+    target_day = (python_weekday + 1) % 7
+    arrival_time_int = arrival_dt.hour * 100 + arrival_dt.minute
+
+    for period in regular_opening_hours.get("periods", []):
+        open_info = period.get("open", {})
+        close_info = period.get("close", {})
+
+        if open_info.get("day") == target_day:
+            open_time = open_info.get("hour", 0) * 100 + open_info.get("minute", 0)
+
+            # 24時間営業などの場合 close がないことがある
+            if not close_info:
+                return True
+
+            close_time = close_info.get("hour", 0) * 100 + close_info.get("minute", 0)
+
+            # 日をまたぐ営業（例: 18:00〜翌2:00）の対応
+            if close_time < open_time:
+                if arrival_time_int >= open_time or arrival_time_int < close_time:
+                    return True
+            else:
+                if open_time <= arrival_time_int < close_time:
+                    return True
+
+    return False
+
 def get_place_info(query):
     if not GOOGLE_MAPS_API_KEY:
         return None
@@ -171,7 +216,7 @@ def get_place_info(query):
             "places.formattedAddress,"
             "places.rating,"
             "places.userRatingCount,"
-            "places.currentOpeningHours.openNow,"
+            "places.regularOpeningHours,"  # ★ 週間営業スケジュールを取得
             "places.googleMapsUri"
         ),
     }
@@ -196,7 +241,7 @@ def get_place_info(query):
             "address": p.get("formattedAddress", ""),
             "rating": p.get("rating", 0.0),
             "review_count": p.get("userRatingCount", 0),
-            "open_status": p.get("currentOpeningHours", {}).get("openNow", False),
+            "regular_opening_hours": p.get("regularOpeningHours"),  # ★ 営業時間データを追加
             "maps_url": p.get("googleMapsUri", f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(query)}")
         }
     except Exception:
@@ -255,29 +300,30 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         # Google Places APIから最新の正確な情報を取得
         google = get_place_info(place.get("name", ""))
         
+        dist = radius_km / 2
+        arrival_dt = estimate_arrival(dist)
+
         # Google Places APIが有効でない・検索失敗時はフォールバック処理
         if google is None:
             name = place.get("name", "不明な店舗")
             rating = 4.0
             review_count = 100
             address = "住所情報なし"
-            open_status = True
+            open_status = None  # ★ フォールバック時は「不明」にする
             maps_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(name)}"
         else:
             name = google["name"]
             rating = float(google["rating"])
             review_count = int(google["review_count"])
             address = google["address"]
-            open_status = google["open_status"]
             maps_url = google["maps_url"]
+            # ★ 到着予定時刻における営業判定を実施
+            open_status = check_open_at_time(google["regular_opening_hours"], arrival_dt)
 
         place_id = hashlib.md5(name.encode()).hexdigest()
 
         save_snapshot(place_id, name, review_count, rating)
         buzz_rate = get_buzz_rate(place_id, review_count)
-
-        dist = radius_km / 2
-        arrival_dt = estimate_arrival(dist)
 
         fallback_score = round(rating + math.log10(review_count + 1), 3)
 
@@ -306,7 +352,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         )
     )
     return candidates[:10]
-
+    
 # ------------------------------------------------------------
 # UI
 # ------------------------------------------------------------

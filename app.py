@@ -168,7 +168,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         generation_config = genai.GenerationConfig(
             response_mime_type="application/json"
         )
-        # 404エラー回避のため安定モデル gemini-2.5-flash に変更
+        # 404エラー回避のため安定モデル gemini-1.5-flash に変更
         model = genai.GenerativeModel(
             'gemini-1.5-flash',
             generation_config=generation_config

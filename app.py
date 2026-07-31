@@ -421,9 +421,11 @@ def search_places_google(location_str, radius_km, search_query_keyword):
 
                 if plat is not None and plng is not None:
                     distance = haversine(lat, lng, plat, plng)
+
+                    """
                     if distance > radius_km:
                         continue
-            
+                    """
 
             name = p.get("displayName", {}).get("text", "")
             rating = float(p.get("rating", 0.0))
@@ -496,8 +498,10 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
             p["regular_opening_hours"], p["open_now_fallback"], arrival_dt
         )
 
+        """
         if open_status is False:
             continue
+        """
 
         p["arrival_dt"] = arrival_dt
         p["drive_time_min"] = drive_time_min

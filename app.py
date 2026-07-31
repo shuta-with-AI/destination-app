@@ -306,7 +306,7 @@ def get_routes_matrix(origin_str, destinations):
 # ------------------------------------------------------------
 def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival_dt):
     if not regular_opening_hours or "periods" not in regular_opening_hours:
-        is_open = open_now_fallback if open_now_fallback is not None else True
+        is_open = open_now_fallback if open_now_fallback is not None else False
         return is_open, "不明", "不明"
 
     periods = regular_opening_hours.get("periods", [])
@@ -671,10 +671,10 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
             p["regular_opening_hours"], p["open_now_fallback"], arrival_dt
         )
 
-        """
+    
         if open_status is False:
             continue
-        """
+        
 
         p["arrival_dt"] = arrival_dt
         p["drive_time_min"] = drive_time_min
@@ -685,6 +685,7 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
 
     if not open_places:
         return []
+        st.write(p["name"], open_status, p["regular_opening_hours"])
 
     filtered_places = [p for p in open_places if p["rating"] >= min_rating]
     if len(filtered_places) < 10:

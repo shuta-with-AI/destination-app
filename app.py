@@ -375,7 +375,7 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
     # -----------------------------
     # 検索タイプ決定
     # -----------------------------
-    if any(word in search_query_keyword for word in [
+    if any(word in keyword_text for word in [
         "ラーメン",
         "焼肉",
         "ハンバーガー",
@@ -383,9 +383,11 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
         "和食",
         "レストラン"
     ]):
-        included_types = ["restaurant"]
+        included_types = [
+            "restaurant"
+        ]
 
-    elif any(word in search_query_keyword for word in [
+    elif any(word in keyword_text for word in [
         "カフェ",
         "パン",
         "ケーキ",
@@ -393,9 +395,13 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
         "クレープ",
         "スイーツ"
     ]):
-        included_types = ["cafe", "bakery"]
+        included_types = [
+            "cafe",
+            "bakery",
+            "ice_cream_shop"
+        ]
 
-    elif any(word in search_query_keyword for word in [
+    elif any(word in keyword_text for word in [
         "夜景",
         "海",
         "公園",
@@ -405,11 +411,14 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
     ]):
         included_types = [
             "tourist_attraction",
-            "park"
+            "park",
         ]
 
     else:
-        included_types = ["restaurant"]
+        included_types = [
+            "restaurant",
+            "cafe",
+        ]
 
 
     url = "https://places.googleapis.com/v1/places:searchNearby"
@@ -494,7 +503,7 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
         for p in raw_places:
 
 
-            name = p.get(
+            name_check = p.get(
                 "displayName",
                 {}
             ).get(
@@ -502,6 +511,31 @@ def search_places_google(location_str, radius_km, search_query_keyword, selected
                 ""
             )
 
+            if "ラーメン" in keyword_text:
+
+                if not any(x in name_check for x in [
+                    "ラーメン",
+                    "麺",
+                    "中華"
+                ]):
+                    continue
+
+            if any(x in keyword_text for x in [
+                "スイーツ",
+                "アイス",
+                "ケーキ",
+                "クレープ"
+            ]):
+
+            if not any(x in name_check for x in [
+                "カフェ",
+                "ケーキ",
+                "菓子",
+                "スイーツ",
+                "ジェラート",
+                "アイス"
+            ]):
+                continue
 
             rating = float(
                 p.get(

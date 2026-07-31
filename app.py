@@ -32,7 +32,7 @@ import math
 # ------------------------------------------------------------
 # 初期設定
 # ------------------------------------------------------------
-st.set_page_config(page_title="目的地ここに決めた！", page_icon="🚗", layout="wide")
+st.set_page_config(page_title="ドライブ先提案アプリ", page_icon="🚗", layout="wide")
 
 DB_PATH = "drive_app_data.db"
 
@@ -394,7 +394,7 @@ def run_search(lat, lng, radius_km, purpose, budget_filter, min_rating):
 # ------------------------------------------------------------
 def main():
     init_db()
-    st.title("🚗 ドライブ先提案アプリ")
+    st.title("行き先に悩む全てのドライバーへ")
     st.caption("現在地・ドライブ圏内・目的を入力すると、話題のスポットを提案します")
 
     if not GOOGLE_MAPS_API_KEY:

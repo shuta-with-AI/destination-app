@@ -395,7 +395,7 @@ def run_search(lat, lng, radius_km, purpose, budget_filter, min_rating):
 def main():
     init_db()
     st.title("行き先に悩む全てのドライバーへ")
-    st.caption("現在地・ドライブ圏内・目的を入力すると、話題のスポットを提案します")
+    st.caption("現在地・距離・目的を入力すると、話題のスポットを提案します")
 
     if not GOOGLE_MAPS_API_KEY:
         st.warning(

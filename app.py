@@ -3,10 +3,10 @@
 ドライブ先提案アプリ
 ====================
 現在地・ドライブ圏内・目的を入力すると、
-1. Google Places API (New) で指定エリアの店舗を検索 (写真最大10枚取得)
+1. Google Places API (New) で指定エリアの店舗および最新口コミを取得
 2. Google Distance Matrix API で現在地から各店舗への正確な車移動時間を計算
 3. 店舗ごとに異なる到着予定時刻に基づき、営業状況（24時間・深夜営業対応）を判定
-4. Gemini Vision API で写真の中から「メニュー表」を自動認識＆OCR解析してメニュー抽出
+4. Gemini API で口コミから代表メニュー3選＆価格を自動抽出し、ランキング化
 5. 上位10件を表示し、ナビ案内やシェア機能を提供する。
 """
 
@@ -19,8 +19,6 @@ import hashlib
 import urllib.parse
 import traceback
 import requests
-import io
-from PIL import Image
 from google import genai
 from google.genai import types
 from zoneinfo import ZoneInfo
@@ -40,11 +38,12 @@ client = None
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
 
+# ★ 深夜でもラーメン屋や牛丼屋、深夜食堂がヒットするように検索ワードを強化
 PURPOSE_KEYWORDS = {
-    "ご飯": "レストラン グルメ 人気店",
-    "スイーツ": "スイーツ カフェ",
+    "ご飯": "レストラン グルメ ラーメン 牛丼 居酒屋 深夜営業 食事",
+    "スイーツ": "スイーツ カフェ 夜カフェ",
     "パン": "パン屋 ベーカリー",
-    "景色": "絶景 展望 景色 観光スポット",
+    "景色": "絶景 展望 景色 観光スポット 夜景",
 }
 
 RANGE_OPTIONS = {
@@ -207,6 +206,7 @@ def check_open_at_time(regular_opening_hours, open_now_fallback, arrival_dt):
 
     periods = regular_opening_hours.get("periods", [])
     
+    # 24時間営業判定
     if len(periods) == 1:
         op = periods[0].get("open", {})
         if op.get("day") == 0 and op.get("hour") == 0 and op.get("minute") == 0 and "close" not in periods[0]:
@@ -240,7 +240,7 @@ def check_open_at_time(regular_opening_hours, open_now_fallback, arrival_dt):
     return False
 
 # ------------------------------------------------------------
-# Google Places API 検索 (写真最大10枚取得)
+# Google Places API 検索 (写真・口コミ取得)
 # ------------------------------------------------------------
 def search_places_google(location_str, radius_km, purpose):
     if not GOOGLE_MAPS_API_KEY:
@@ -262,7 +262,8 @@ def search_places_google(location_str, radius_km, purpose):
             "places.currentOpeningHours.openNow,"
             "places.googleMapsUri,"
             "places.location,"
-            "places.photos"
+            "places.photos,"
+            "places.reviews"  # ★ アプローチ1用：口コミテキストを取得
         ),
     }
 
@@ -305,14 +306,22 @@ def search_places_google(location_str, radius_km, purpose):
             rating = float(p.get("rating", 0.0))
             review_count = int(p.get("userRatingCount", 0))
 
-            # 写真URLを最大10枚生成
+            # 写真URL取得 (最大4枚)
             photos_data = p.get("photos", [])
             photo_urls = []
-            for photo in photos_data[:10]:
+            for photo in photos_data[:4]:
                 photo_name = photo.get("name")
                 if photo_name:
-                    url_img = f"https://places.googleapis.com/v1/{photo_name}/media?key={GOOGLE_MAPS_API_KEY}&maxHeightPx=600&maxWidthPx=600"
+                    url_img = f"https://places.googleapis.com/v1/{photo_name}/media?key={GOOGLE_MAPS_API_KEY}&maxHeightPx=400&maxWidthPx=400"
                     photo_urls.append(url_img)
+
+            # ★ 口コミテキストの抽出 (上位5件)
+            reviews = p.get("reviews", [])
+            review_texts = []
+            for rev in reviews[:5]:
+                txt = rev.get("text", {}).get("text", "")
+                if txt:
+                    review_texts.append(txt)
 
             places.append({
                 "google_id": p.get("id"),
@@ -324,7 +333,8 @@ def search_places_google(location_str, radius_km, purpose):
                 "regular_opening_hours": p.get("regularOpeningHours"),
                 "open_now_fallback": p.get("currentOpeningHours", {}).get("openNow"),
                 "location": p.get("location"),
-                "photo_urls": photo_urls
+                "photo_urls": photo_urls,
+                "review_texts": " / ".join(review_texts)  # 口コミを結合して格納
             })
 
         return places
@@ -332,72 +342,6 @@ def search_places_google(location_str, radius_km, purpose):
     except Exception as e:
         st.error(f"通信エラーが発生しました: {str(e)}")
         return []
-
-# ------------------------------------------------------------
-# Gemini Vision API による「メニュー表画像認識 & OCR解析」
-# ------------------------------------------------------------
-def analyze_menu_from_images(place_name, photo_urls):
-    """
-    写真リストの中からGemini Visionでメニュー表画像を特定し、メニュー項目と価格を抽出する
-    """
-    if not client or not photo_urls:
-        return None, []
-
-    downloaded_images = []
-    image_bytes_list = []
-
-    # 画像をダウンロード (先頭最大5枚までVisionで解析してAPI消費と時間を節約)
-    for url in photo_urls[:5]:
-        try:
-            resp = requests.get(url, timeout=3)
-            if resp.status_code == 200:
-                img = Image.open(io.BytesIO(resp.content))
-                downloaded_images.append((url, img))
-                image_bytes_list.append(img)
-        except Exception:
-            continue
-
-    if not image_bytes_list:
-        return None, []
-
-    prompt = f"""
-    あなたは優秀な画像解析AIです。
-    以下に「{place_name}」の店舗写真（料理、内観、外観、メニュー表など）を複数枚提供します。
-
-    【タスク】
-    1. 提供された写真の中に「メニュー表」「お品書き」「看板」「券売機」など、メニューと価格が写っている画像があるか判定してください。
-    2. メニュー表と思われる画像がある場合、その画像の「index (0始まり)」を「menu_image_index」として指定してください。見当たらない場合は -1 としてください。
-    3. 画像に写っている文字（OCR）から、代表的なメニュー名と価格を抽出して「popular_menu」の配列として出力してください。
-
-    【出力フォーマット (JSONのみ)】
-    {{
-      "menu_image_index": 0,
-      "popular_menu": ["〇〇セット (1,200円)", "〇〇ラーメン (850円)"]
-    }}
-    """
-
-    try:
-        # 画像群とプロンプトをGeminiに一括送信
-        contents = [prompt] + image_bytes_list
-        response = client.models.generate_content(
-            model="gemini-flash-latest",
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
-        )
-        res_data = json.loads(response.text)
-        menu_idx = res_data.get("menu_image_index", -1)
-        popular_menu = res_data.get("popular_menu", [])
-
-        menu_image_url = None
-        if 0 <= menu_idx < len(downloaded_images):
-            menu_image_url = downloaded_images[menu_idx][0]
-
-        return menu_image_url, popular_menu
-
-    except Exception:
-        return None, []
 
 # ------------------------------------------------------------
 # メイン検索処理
@@ -447,21 +391,22 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         open_places.sort(key=lambda x: -x["rating"])
         filtered_places = open_places
 
-    # STEP 4: Gemini に評価・ランキング・おすすめ理由・予算感を生成させる
+    # STEP 4: Gemini に評価・ランキング・おすすめ理由・【口コミからの人気メニュー抽出】を行わせる
     input_list_for_gemini = [
         {
             "id": idx,
             "name": p["name"],
             "rating": p["rating"],
             "review_count": p["review_count"],
-            "address": p["address"]
+            "address": p["address"],
+            "reviews": p["review_texts"]  # 口コミデータも渡す
         }
         for idx, p in enumerate(filtered_places)
     ]
 
     prompt = f"""
     あなたはドライブの目的地提案アシスタントです。
-    以下の【営業中の店舗リスト】の中から、ドライブの目的地として特におすすめのスポットを厳選し、
+    以下の【営業中の店舗リスト（口コミデータ付き）】の中から、ドライブの目的地として特におすすめのスポットを厳選し、
     おすすめ順（ランキング順）に並び替えてJSONで出力してください。
 
     【検索条件】
@@ -473,6 +418,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
 
     【出力ルール】
     - 入力リストに存在する店舗のみを使ってください（架空の店舗を捏造しないでください）。
+    - 提供された「reviews (口コミ)」のテキストを分析し、その店舗で人気の具体的メニュー名や商品名（できれば口コミ内の価格も）を「popular_menu」として最大3つ抽出してください。口コミに具体的なメニューがない場合は、店名やジャンルから代表メニューを推測して補完してください。
     - 各店舗について、予算目安（例: 1000〜2000円）と、ドライブで訪れるべき魅力を簡潔な「buzz_reason」として作成してください。
     - 以下のJSON配列フォーマットのみを出力してください。
 
@@ -480,7 +426,8 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
       {{
         "id": 0,
         "budget_name": "1000〜2000円",
-        "buzz_reason": "地元の絶品グルメが楽しめる人気スポットです！"
+        "popular_menu": ["濃厚とんこつラーメン (850円)", "黒豚餃子 (450円)", "替玉 (150円)"],
+        "buzz_reason": "深夜まで行列ができる地元の人気ラーメン店です！"
       }}
     ]
     """
@@ -495,9 +442,9 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         )
         ranked_indices = json.loads(response.text)
     except Exception:
-        ranked_indices = [{"id": idx, "budget_name": "", "buzz_reason": "おすすめスポットです！"} for idx, _ in enumerate(filtered_places)]
+        ranked_indices = [{"id": idx, "budget_name": "", "popular_menu": [], "buzz_reason": "おすすめスポットです！"} for idx, _ in enumerate(filtered_places)]
 
-    # STEP 5: 上位10件について Vision API でメニュー表画像を特定＆文字起こし
+    # STEP 5: データのマージと整形
     candidates = []
     top_items = ranked_indices[:10]
 
@@ -510,9 +457,6 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         name = base_info["name"]
         rating = base_info["rating"]
         review_count = base_info["review_count"]
-
-        # 🌟 Gemini Vision で「メニュー表画像」を判別＆文字解析
-        menu_img_url, detected_menus = analyze_menu_from_images(name, base_info.get("photo_urls", []))
 
         place_id = hashlib.md5(name.encode()).hexdigest()
         save_snapshot(place_id, name, review_count, rating)
@@ -534,8 +478,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
             "maps_url": base_info["maps_url"],
             "buzz_reason": item.get("buzz_reason", "話題の注目スポットです！"),
             "photo_urls": base_info.get("photo_urls", []),
-            "menu_img_url": menu_img_url,       # 🌟 判別されたメニュー画像
-            "detected_menus": detected_menus,   # 🌟 検出されたメニュー名と価格
+            "popular_menu": item.get("popular_menu", []),  # 口コミから抽出された人気メニュー
         })
 
     return candidates
@@ -609,7 +552,7 @@ def main():
             elif not GEMINI_API_KEY or not GOOGLE_MAPS_API_KEY:
                 st.error("APIキーが未設定のため検索できません。")
             else:
-                with st.spinner("検索中... (AIがメニュー画像を解析中)"):
+                with st.spinner("検索中..."):
                     results = run_search(location_str, radius_km, purpose, budget_filter, min_rating)
 
                 if not results:
@@ -628,15 +571,11 @@ def main():
                                     with img_cols[i]:
                                         st.image(img_url, use_container_width=True)
 
-                            # 🌟 AIが判別したメニュー表画像とメニュー文字の表示
-                            if r.get("detected_menus") or r.get("menu_img_url"):
-                                with st.expander("🍽️ AIが見つけたメニュー情報・メニュー表画像"):
-                                    if r.get("menu_img_url"):
-                                        st.image(r["menu_img_url"], caption="AIがメニュー表と判定した画像", width=300)
-                                    if r.get("detected_menus"):
-                                        st.write("**メニュー解析結果:**")
-                                        for m in r["detected_menus"]:
-                                            st.write(f"- {m}")
+                            # ★ 口コミからAIが抽出した人気メニューの表示
+                            if r.get("popular_menu"):
+                                st.write("🍽️ **AIが口コミから見つけた人気メニュー**")
+                                for item in r["popular_menu"]:
+                                    st.write(f"- {item}")
 
                             if r["address"]:
                                 st.write(f"📍 {r['address']}")

@@ -3,8 +3,8 @@
 ドライブ先提案アプリ
 ====================
 現在地・ドライブ圏内・目的を入力すると、
-1. Google Places API (New) で指定エリアの店舗を検索
-2. Google Routes API で現在地から各店舗への正確な車移動時間を一括計算
+1. Google Places API (New) で指定エリアの店舗を検索 (写真付き)
+2. Google Distance Matrix API で現在地から各店舗への正確な車移動時間を一括計算
 3. 店舗ごとに異なる到着予定時刻に基づき、営業状況（24時間・深夜営業対応）を判定
 4. Gemini API で営業確定店舗をランキング化し、おすすめ理由（buzz_reason）や予算感を生成
 5. 上位10件を表示し、ナビ案内やシェア機能を提供する。
@@ -150,15 +150,11 @@ def get_trending_by_shares(limit=10):
     return rows
 
 # ------------------------------------------------------------
-# Google Routes API 連携 (移動時間計算)
-# ------------------------------------------------------------
-# ------------------------------------------------------------
 # Google Distance Matrix API 連携 (移動時間計算)
 # ------------------------------------------------------------
 def get_routes_matrix(origin_str, destinations):
     """
     Google Maps Distance Matrix API を使い、現在地から各目的地への走行時間(秒)を一括取得
-    （住所文字列でもそのまま使えます）
     """
     if not GOOGLE_MAPS_API_KEY or not destinations:
         return {}
@@ -186,7 +182,6 @@ def get_routes_matrix(origin_str, destinations):
         r = requests.get(url, params=params, timeout=10)
         data = r.json()
         
-        # ★エラーが起きたら画面に赤文字で理由を出すようにしました
         if data.get("status") != "OK":
             st.error(f"Distance Matrix API エラー: {data.get('status')}")
             if "error_message" in data:
@@ -208,6 +203,7 @@ def get_routes_matrix(origin_str, destinations):
     except Exception as e:
         st.error(f"移動時間取得エラー: {str(e)}")
         return {}
+
 # ------------------------------------------------------------
 # 高度な営業時間判定
 # ------------------------------------------------------------
@@ -259,7 +255,7 @@ def check_open_at_time(regular_opening_hours, open_now_fallback, arrival_dt):
 # ------------------------------------------------------------
 def search_places_google(location_str, radius_km, purpose):
     """
-    Google Places API (New) で周辺店舗を直検索 (座標情報を含む)
+    Google Places API (New) で周辺店舗を直検索 (座標と写真を取得)
     """
     if not GOOGLE_MAPS_API_KEY:
         st.error("GOOGLE_MAPS_API_KEY が未設定です。")
@@ -279,7 +275,8 @@ def search_places_google(location_str, radius_km, purpose):
             "places.regularOpeningHours,"
             "places.currentOpeningHours.openNow,"
             "places.googleMapsUri,"
-            "places.location"  # ★ Routes API用に座標を取得
+            "places.location,"
+            "places.photos"  # ★ 写真データを取得
         ),
     }
 
@@ -310,7 +307,6 @@ def search_places_google(location_str, radius_km, purpose):
         r = requests.post(url, headers=headers, json=body, timeout=8)
         if r.status_code != 200:
             st.error(f"Google API エラー (ステータスコード: {r.status_code})")
-            st.json(r.json())
             return []
 
         data = r.json()
@@ -322,6 +318,15 @@ def search_places_google(location_str, radius_km, purpose):
             rating = float(p.get("rating", 0.0))
             review_count = int(p.get("userRatingCount", 0))
 
+            # 写真URLを最大2枚生成
+            photos_data = p.get("photos", [])
+            photo_urls = []
+            for photo in photos_data[:2]:
+                photo_name = photo.get("name")
+                if photo_name:
+                    url_img = f"https://places.googleapis.com/v1/{photo_name}/media?key={GOOGLE_MAPS_API_KEY}&maxHeightPx=400&maxWidthPx=400"
+                    photo_urls.append(url_img)
+
             places.append({
                 "google_id": p.get("id"),
                 "name": name,
@@ -331,7 +336,8 @@ def search_places_google(location_str, radius_km, purpose):
                 "maps_url": p.get("googleMapsUri", f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(name)}"),
                 "regular_opening_hours": p.get("regularOpeningHours"),
                 "open_now_fallback": p.get("currentOpeningHours", {}).get("openNow"),
-                "location": p.get("location")  # {'latitude': ..., 'longitude': ...}
+                "location": p.get("location"),
+                "photo_urls": photo_urls
             })
 
         return places
@@ -355,13 +361,13 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     if not raw_places:
         return []
 
-    # STEP 2: Routes API で現在地から各店舗への個別移動時間(秒)を取得
+    # STEP 2: Distance Matrix API で現在地から各店舗への個別移動時間(秒)を取得
     durations_map = get_routes_matrix(location_str, raw_places)
 
     # STEP 3: 店舗ごとの個別の到着予定時間を計算 & 営業中店舗のフィルタリング
     open_places = []
     for idx, p in enumerate(raw_places):
-        # Routes APIから時間取得できなければ平均30km/hの簡易計算でフォールバック
+        # APIから時間取得できなければ平均30km/hの簡易計算でフォールバック
         drive_seconds = durations_map.get(idx)
         if drive_seconds is not None and drive_seconds > 0:
             arrival_dt = now + datetime.timedelta(seconds=drive_seconds)
@@ -470,6 +476,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
             "address": base_info["address"],
             "maps_url": base_info["maps_url"],
             "buzz_reason": item.get("buzz_reason", "話題の注目スポットです！"),
+            "photo_urls": base_info.get("photo_urls", []),
         })
 
     return candidates[:10]
@@ -543,7 +550,7 @@ def main():
             elif not GEMINI_API_KEY or not GOOGLE_MAPS_API_KEY:
                 st.error("APIキーが未設定のため検索できません。")
             else:
-                with st.spinner("Google Maps & Routesから移動時間と営業状況を取得し、Geminiで厳選中..."):
+                with st.spinner("検索中..."):
                     results = run_search(location_str, radius_km, purpose, budget_filter, min_rating)
 
                 if not results:
@@ -554,6 +561,14 @@ def main():
                         cols = st.columns([3, 1])
                         with cols[0]:
                             st.subheader(r["name"])
+                            
+                            # 写真の表示
+                            if r.get("photo_urls"):
+                                img_cols = st.columns(len(r["photo_urls"]))
+                                for i, img_url in enumerate(r["photo_urls"]):
+                                    with img_cols[i]:
+                                        st.image(img_url, use_container_width=True)
+                            
                             if r["address"]:
                                 st.write(f"📍 {r['address']}")
                             st.write(f"⭐ 評価: {r['rating']} ({r['review_count']}件)")

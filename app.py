@@ -30,6 +30,7 @@ import math
 import json
 import hashlib
 import urllib.parse
+import google.generativeai as genai
 
 # ------------------------------------------------------------
 # 初期設定
@@ -38,8 +39,11 @@ st.set_page_config(page_title="ドライブ先提案アプリ", page_icon="🚗"
 
 DB_PATH = "drive_app_data.db"
 
-# Google Mapsとホットペッパーは使用しないため、Gemini APIのみ取得
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+
+# Gemini APIの初期設定
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 PURPOSE_KEYWORDS = {
     "ご飯": "レストラン",
@@ -54,7 +58,6 @@ RANGE_OPTIONS = {
     "30〜50km": 50,
     "手動入力": None,
 }
-
 
 # ------------------------------------------------------------
 # DB初期化
@@ -85,12 +88,10 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 def save_snapshot(place_id, name, review_count, rating):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     today = datetime.date.today().isoformat()
-    # 同じ店・同じ日はUPDATE、無ければINSERT
     c.execute(
         "SELECT 1 FROM snapshots WHERE place_id=? AND snapshot_date=?",
         (place_id, today),
@@ -108,13 +109,10 @@ def save_snapshot(place_id, name, review_count, rating):
     conn.commit()
     conn.close()
 
-
 def get_buzz_rate(place_id, current_review_count):
-    """7日前に近いスナップショットと比較して口コミ増加率(%)を返す。データが無ければNone"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     target_date = (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
-    # target_date以前で一番新しいスナップショットを使う
     c.execute(
         """
         SELECT review_count FROM snapshots
@@ -129,7 +127,6 @@ def get_buzz_rate(place_id, current_review_count):
         return None
     old_count = row[0]
     return round((current_review_count - old_count) / old_count * 100, 1)
-
 
 def log_share(place_id, name):
     conn = sqlite3.connect(DB_PATH)
@@ -148,7 +145,6 @@ def log_share(place_id, name):
     conn.commit()
     conn.close()
 
-
 def get_trending_by_shares(limit=10):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -160,7 +156,6 @@ def get_trending_by_shares(limit=10):
     conn.close()
     return rows
 
-
 # ------------------------------------------------------------
 # Gemini + Google検索連携（バズり理由の要約）
 # ------------------------------------------------------------
@@ -168,39 +163,26 @@ def get_buzz_reason_gemini(place_name, area_name):
     if not GEMINI_API_KEY:
         return "（Gemini APIキー未設定のため理由の取得はスキップされました)"
     try:
-        from google import genai
-        from google.genai import types
-
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        grounding_tool = types.Tool(google_search=types.GoogleSearch())
-        config = types.GenerateContentConfig(tools=[grounding_tool])
+        model = genai.GenerativeModel('gemini-1.5-flash')
         prompt = (
             f"「{area_name}」にある「{place_name}」について、直近1週間以内でSNS(Instagram, TikTok)や"
             f"ニュース記事で話題になっている理由を、分かっていれば日本語で1文（40文字以内）で簡潔に述べてください。"
             f"特に話題性の情報が見つからない場合は「特に話題の情報は見つかりませんでした」とだけ答えてください。"
         )
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=config,
-        )
+        response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
         return f"（バズり理由の取得に失敗: {e}）"
-
 
 # ------------------------------------------------------------
 # 到着時刻の判定
 # ------------------------------------------------------------
 def estimate_arrival(distance_km, avg_speed_kmh=30):
-    """簡易見積もり:平均時速30km/hのドライブとして到着時刻を計算(信号や渋滞は考慮しない簡易値)"""
     hours = distance_km / avg_speed_kmh
     return datetime.datetime.now() + datetime.timedelta(hours=hours)
 
-# Geminiの出力に合わせたナビURLの生成
 def navi_url(name):
     return f"https://www.google.com/maps/dir/?api=1&destination={urllib.parse.quote(name)}&travelmode=driving"
-
 
 # ------------------------------------------------------------
 # メイン処理（Google Places APIの代わりにGemini APIを使用）
@@ -212,9 +194,7 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     keyword = PURPOSE_KEYWORDS.get(purpose, purpose)
     
     try:
-        from google import genai
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        
+        model = genai.GenerativeModel('gemini-1.5-flash')
         prompt = f"""
         あなたは優秀なドライブ先提案アシスタントです。
         以下の条件に合致する実在のドライブ目的地を10件提案してください。
@@ -239,12 +219,8 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         ]
         """
         
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-        )
+        response = model.generate_content(prompt)
         
-        # JSON部分を抽出
         text = response.text.strip()
         if text.startswith("```json"):
             text = text[7:-3].strip()
@@ -260,23 +236,19 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
     candidates = []
     for place in raw_results:
         name = place.get("name", "不明な店舗")
-        # プレイスIDの代わりに名前をハッシュ化して一意のIDとする
         place_id = hashlib.md5(name.encode()).hexdigest()
         rating = float(place.get("rating", 3.0))
         review_count = int(place.get("review_count", 100))
         
         if rating < min_rating:
-            continue  # 評価の足切り
+            continue
 
-        # スナップショット保存(毎回の検索で今日の分を記録・上書き)
         save_snapshot(place_id, name, review_count, rating)
         buzz_rate = get_buzz_rate(place_id, review_count)
 
-        # 簡易見積もりのため距離は一律で半径の半分とする
         dist = radius_km / 2
         arrival_dt = estimate_arrival(dist)
 
-        # 増加率データが無い間の暫定スコア(評価点 + log10(口コミ数))
         fallback_score = round(rating + math.log10(review_count + 1), 3)
 
         candidates.append(
@@ -294,8 +266,6 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
             }
         )
 
-    # 増加率データがある店はその値で優先順位を決め、
-    # まだ無い店(データ蓄積中)は暫定スコア(評価+口コミ数)で並べる
     candidates.sort(
         key=lambda x: (
             x["buzz_rate"] is None,
@@ -304,7 +274,6 @@ def run_search(location_str, radius_km, purpose, budget_filter, min_rating):
         )
     )
     return candidates[:10]
-
 
 # ------------------------------------------------------------
 # UI
@@ -388,7 +357,7 @@ def main():
                             if r["buzz_rate"] is None:
                                 st.write(
                                     "📈 口コミ増加率: データ蓄積中(1週間分のデータが必要です)"
-                                    f" ／ 現時点の暫定スコア: {r['fallback_score']}"
+                                    f" ／ 現時点の暫定スコア: {r['fallback_score']} "
                                     "(評価点と口コミ数から算出。増加率データが揃い次第そちらに切り替わります)"
                                 )
                             else:
@@ -420,7 +389,6 @@ def main():
         else:
             for i, (name, count) in enumerate(trending, start=1):
                 st.write(f"{i}. **{name}** — {count}回シェアされました")
-
 
 if __name__ == "__main__":
     main()

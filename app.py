@@ -356,7 +356,7 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
 # ------------------------------------------------------------
 # Google Places API 検索 (エリア外店舗を絶対遮断)
 # ------------------------------------------------------------
-def search_places_google(location_str, radius_km, search_query_keyword):
+def search_places_google(location_str, radius_km, search_query_keyword, selected_keywords):
 
     if not GOOGLE_MAPS_API_KEY:
         st.error("GOOGLE_MAPS_API_KEY が未設定です。")
@@ -644,14 +644,20 @@ def search_places_google(location_str, radius_km, search_query_keyword):
 # ------------------------------------------------------------
 # メイン検索処理
 # ------------------------------------------------------------
-def run_search(location_str, radius_km, search_query_keyword, budget_filter, min_rating):
+def run_search(location_str, radius_km, search_query_keyword, budget_filter, min_rating, selected_keywords):
     if not client:
         st.error("GEMINI_API_KEY が読み込めていません。Secretsの設定を確認してください。")
         return []
 
     now = datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
 
-    raw_places = search_places_google(location_str, radius_km, search_query_keyword)
+    raw_places = search_places_google(
+        location_str,
+        radius_km,
+        search_query_keyword,
+        selected_keywords
+    )
+    
     if not raw_places:
         return []
 
@@ -934,6 +940,7 @@ def main():
                         combined_keywords,
                         budget_filter,
                         min_rating
+                        selected_keywords
                     )
 
                 if not results:

@@ -5,7 +5,7 @@
 現在地・ドライブ圏内・目的を入力すると、
 1. Gemini API で自由入力ワードをGoogle検索に最適化された類似キーワード群へ拡張
 2. 現在地から緯度経度を特定し、エリア内の店舗を取得
-3. Google Places API (New) で指定エリアの店舗および最新口コミ・写真（最大2枚）を取得
+3. Google Places API (New) で複数カテゴリを統合して店舗および最新口コミ・写真（最大2枚）を取得
 4. Google Distance Matrix API で現在地から各店舗への正確な車移動時間を計算
 5. 到着予定時刻に基づき、閉店時間・ラストオーダー目安を算出
 6. Gemini API で口コミや店名から代表メニュー3選＆価格を自動抽出し、ランキング化
@@ -334,7 +334,7 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
     return False, "営業時間外", "営業時間外"
 
 # ------------------------------------------------------------
-# Google Places API 検索 (駅・学校等を完全除外)
+# Google Places API 検索 (複数カテゴリ統合・駅等除外)
 # ------------------------------------------------------------
 def search_places_google(location_str, radius_km, search_query_keyword):
     if not GOOGLE_MAPS_API_KEY:
@@ -346,15 +346,20 @@ def search_places_google(location_str, radius_km, search_query_keyword):
         st.error("現在地の取得に失敗しました")
         return []
 
-    # 検索キーワードに応じて適切な includedTypes を設定
     keyword_lower = search_query_keyword.lower()
+    
+    # キーワードに応じて複数の検索タイプ候補をリストで用意し、取得件数を大幅に増やす
     if any(w in keyword_lower for w in ["カフェ", "パン", "ケーキ", "アイス", "クレープ", "スイーツ", "パフェ"]):
-        included_types = ["cafe", "bakery", "ice_cream_shop"]
+        target_types_list = [["cafe"], ["bakery"], ["ice_cream_shop"]]
     elif any(w in keyword_lower for w in ["夜景", "海", "公園", "自然", "観光", "展望", "道の駅"]):
-        included_types = ["tourist_attraction", "park"]
+        target_types_list = [["tourist_attraction"], ["park"]]
     else:
-        # ご飯・グルメ全般
-        included_types = ["restaurant", "meal_takeaway", "fast_food_restaurant", "bar"]
+        target_types_list = [
+            ["restaurant"],
+            ["meal_takeaway"],
+            ["fast_food_restaurant"],
+            ["bar"]
+        ]
 
     url = "https://places.googleapis.com/v1/places:searchNearby"
 
@@ -377,92 +382,91 @@ def search_places_google(location_str, radius_km, search_query_keyword):
         ),
     }
 
-    body = {
-        "includedTypes": included_types,
-        "maxResultCount": 20,
-        "locationRestriction": {
-            "circle": {
-                "center": {
-                    "latitude": lat,
-                    "longitude": lng
-                },
-                "radius": min(radius_km * 1000, 50000)
+    seen_ids = set()
+    all_raw_places = []
+
+    # 各タイプごとにリクエストを送り、重複を除いて統合する
+    for included_types in target_types_list:
+        body = {
+            "includedTypes": included_types,
+            "maxResultCount": 20,
+            "locationRestriction": {
+                "circle": {
+                    "center": {
+                        "latitude": lat,
+                        "longitude": lng
+                    },
+                    "radius": min(radius_km * 1000, 50000)
+                }
             }
         }
+
+        try:
+            r = requests.post(url, headers=headers, json=body, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                for p in data.get("places", []):
+                    pid = p.get("id")
+                    if pid and pid not in seen_ids:
+                        seen_ids.add(pid)
+                        all_raw_places.append(p)
+        except Exception:
+            continue
+
+    st.caption(f"Nearby Search統合取得件数: {len(all_raw_places)}")
+
+    unwanted_types = {
+        "transit_station", "train_station", "subway_station", 
+        "university", "school", "bank", "atm", "gas_station", 
+        "parking", "lodging", "hotel"
     }
 
-    try:
-        r = requests.post(url, headers=headers, json=body, timeout=10)
-        if r.status_code != 200:
-            st.error(f"Google API エラー {r.status_code}\n{r.text}")
-            return []
+    places = []
+    for p in all_raw_places:
+        place_types = p.get("types", [])
+        if any(t in unwanted_types for t in place_types):
+            continue
 
-        data = r.json()
-        raw_places = data.get("places", [])
-        st.caption(f"Nearby Search取得件数: {len(raw_places)}")
+        name_check = p.get("displayName", {}).get("text", "")
+        if any(x in name_check.lower() for x in ["ホテル", "hotel", "旅館", "宿"]):
+            continue
 
-        # 除外したい施設のタイプ
-        unwanted_types = {
-            "transit_station", "train_station", "subway_station", 
-            "university", "school", "bank", "atm", "gas_station", 
-            "parking", "lodging", "hotel"
-        }
+        rating = float(p.get("rating", 0))
+        review_count = int(p.get("userRatingCount", 0))
 
-        places = []
-        for p in raw_places:
-            place_types = p.get("types", [])
-            # 駅や学校、ホテルなどが含まれている場合はスキップ
-            if any(t in unwanted_types for t in place_types):
-                continue
+        photo_urls = []
+        for photo in p.get("photos", [])[:2]:
+            photo_name = photo.get("name")
+            if photo_name:
+                photo_urls.append(
+                    f"https://places.googleapis.com/v1/{photo_name}/media"
+                    f"?key={GOOGLE_MAPS_API_KEY}"
+                    "&maxHeightPx=400"
+                    "&maxWidthPx=400"
+                )
 
-            name_check = p.get("displayName", {}).get("text", "")
+        review_texts = []
+        for rev in p.get("reviews", [])[:5]:
+            txt = rev.get("text", {}).get("text", "")
+            if txt:
+                review_texts.append(txt.replace("\n", " "))
 
-            # 名前にホテルや宿が含まれる場合も除外
-            if any(x in name_check.lower() for x in ["ホテル", "hotel", "旅館", "宿"]):
-                continue
+        places.append({
+            "google_id": p.get("id"),
+            "name": name_check,
+            "address": p.get("formattedAddress", ""),
+            "rating": rating,
+            "review_count": review_count,
+            "maps_url": p.get("googleMapsUri", ""),
+            "regular_opening_hours": p.get("regularOpeningHours"),
+            "open_now_fallback": p.get("currentOpeningHours", {}).get("openNow"),
+            "location": p.get("location"),
+            "photo_urls": photo_urls,
+            "review_texts": " / ".join(review_texts)
+        })
 
-            rating = float(p.get("rating", 0))
-            review_count = int(p.get("userRatingCount", 0))
-
-            # 写真取得
-            photo_urls = []
-            for photo in p.get("photos", [])[:2]:
-                photo_name = photo.get("name")
-                if photo_name:
-                    photo_urls.append(
-                        f"https://places.googleapis.com/v1/{photo_name}/media"
-                        f"?key={GOOGLE_MAPS_API_KEY}"
-                        "&maxHeightPx=400"
-                        "&maxWidthPx=400"
-                    )
-
-            # 口コミ取得
-            review_texts = []
-            for rev in p.get("reviews", [])[:5]:
-                txt = rev.get("text", {}).get("text", "")
-                if txt:
-                    review_texts.append(txt.replace("\n", " "))
-
-            places.append({
-                "google_id": p.get("id"),
-                "name": name_check,
-                "address": p.get("formattedAddress", ""),
-                "rating": rating,
-                "review_count": review_count,
-                "maps_url": p.get("googleMapsUri", ""),
-                "regular_opening_hours": p.get("regularOpeningHours"),
-                "open_now_fallback": p.get("currentOpeningHours", {}).get("openNow"),
-                "location": p.get("location"),
-                "photo_urls": photo_urls,
-                "review_texts": " / ".join(review_texts)
-            })
-
-        st.caption(f"フィルタ後有効店舗数: {len(places)}")
-        return places
-
-    except Exception as e:
-        st.error(f"通信エラー: {e}")
-        return []
+    st.caption(f"フィルタ後有効店舗数: {len(places)}")
+    return places
 
 # ------------------------------------------------------------
 # メイン検索処理

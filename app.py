@@ -357,11 +357,63 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
 # Google Places API 検索 (エリア外店舗を絶対遮断)
 # ------------------------------------------------------------
 def search_places_google(location_str, radius_km, search_query_keyword):
+
     if not GOOGLE_MAPS_API_KEY:
         st.error("GOOGLE_MAPS_API_KEY が未設定です。")
         return []
 
-    url = "https://places.googleapis.com/v1/places:searchText"
+    # -----------------------------
+    # 位置情報取得
+    # -----------------------------
+    lat, lng = geocode_location(location_str)
+
+    if lat is None or lng is None:
+        st.error("現在地の取得に失敗しました")
+        return []
+
+
+    # -----------------------------
+    # 検索タイプ決定
+    # -----------------------------
+    if any(word in search_query_keyword for word in [
+        "ラーメン",
+        "焼肉",
+        "ハンバーガー",
+        "定食",
+        "和食",
+        "レストラン"
+    ]):
+        included_types = ["restaurant"]
+
+    elif any(word in search_query_keyword for word in [
+        "カフェ",
+        "パン",
+        "ケーキ",
+        "アイス",
+        "クレープ",
+        "スイーツ"
+    ]):
+        included_types = ["cafe", "bakery"]
+
+    elif any(word in search_query_keyword for word in [
+        "夜景",
+        "海",
+        "公園",
+        "自然",
+        "観光",
+        "展望"
+    ]):
+        included_types = [
+            "tourist_attraction",
+            "park"
+        ]
+
+    else:
+        included_types = ["restaurant"]
+
+
+    url = "https://places.googleapis.com/v1/places:searchNearby"
+
 
     headers = {
         "Content-Type": "application/json",
@@ -381,88 +433,209 @@ def search_places_google(location_str, radius_km, search_query_keyword):
         ),
     }
 
-    body = {
-        "textQuery": f"{location_str} {search_query_keyword}",
-        "pageSize": 20,
-        "maxResultCount": 20
-    }
 
-    lat, lng = geocode_location(location_str)
-    if lat is not None and lng is not None:
-        safe_radius = min(float(radius_km * 1000), 50000.0)  # 最大50km制限
-        # 🌟 locationRestriction を使って指定範囲外の遠方店舗（群馬など）を完全に遮断
-        body["locationBias"] = {
+    body = {
+
+        "includedTypes": included_types,
+
+        "maxResultCount": 20,
+
+        "locationRestriction": {
+
             "circle": {
-                "center": {"latitude": lat, "longitude": lng},
-                "radius": safe_radius
+
+                "center": {
+                    "latitude": lat,
+                    "longitude": lng
+                },
+
+                "radius": min(
+                    radius_km * 1000,
+                    50000
+                )
             }
         }
-    else:
-        body["textQuery"] = f"{location_str} {search_query_keyword}"
+    }
+
 
     try:
-        r = requests.post(url, headers=headers, json=body, timeout=8)
+
+        r = requests.post(
+            url,
+            headers=headers,
+            json=body,
+            timeout=10
+        )
+
+
         if r.status_code != 200:
-            st.error(f"Google API エラー (ステータスコード: {r.status_code})")
+            st.error(
+                f"Google API エラー {r.status_code}\n{r.text}"
+            )
             return []
 
+
         data = r.json()
-        raw_places = data.get("places", [])
+
+        raw_places = data.get(
+            "places",
+            []
+        )
+
+
+        st.caption(
+            f"Nearby Search取得件数: {len(raw_places)}"
+        )
+
 
         places = []
+
+
         for p in raw_places:
-            
-            
-            # 半径外の店舗を除外
-            if lat is not None and lng is not None:
-                loc = p.get("location", {})
-                plat = loc.get("latitude")
-                plng = loc.get("longitude")
 
-                if plat is not None and plng is not None:
-                    distance = haversine(lat, lng, plat, plng)
 
-                    """
-                    if distance > radius_km:
-                        continue
-                    """
+            name = p.get(
+                "displayName",
+                {}
+            ).get(
+                "text",
+                ""
+            )
 
-            name = p.get("displayName", {}).get("text", "")
-            rating = float(p.get("rating", 0.0))
-            review_count = int(p.get("userRatingCount", 0))
 
-            photos_data = p.get("photos", [])
+            rating = float(
+                p.get(
+                    "rating",
+                    0
+                )
+            )
+
+
+            review_count = int(
+                p.get(
+                    "userRatingCount",
+                    0
+                )
+            )
+
+
+            # -----------------------------
+            # 写真取得
+            # -----------------------------
             photo_urls = []
-            for photo in photos_data[:2]:
-                photo_name = photo.get("name")
-                if photo_name:
-                    url_img = f"https://places.googleapis.com/v1/{photo_name}/media?key={GOOGLE_MAPS_API_KEY}&maxHeightPx=400&maxWidthPx=400"
-                    photo_urls.append(url_img)
 
-            reviews = p.get("reviews", [])
+            for photo in p.get(
+                "photos",
+                []
+            )[:2]:
+
+                photo_name = photo.get(
+                    "name"
+                )
+
+                if photo_name:
+
+                    photo_urls.append(
+                        f"https://places.googleapis.com/v1/{photo_name}/media"
+                        f"?key={GOOGLE_MAPS_API_KEY}"
+                        "&maxHeightPx=400"
+                        "&maxWidthPx=400"
+                    )
+
+
+            # -----------------------------
+            # 口コミ取得
+            # -----------------------------
             review_texts = []
-            for rev in reviews[:5]:
-                txt = rev.get("text", {}).get("text", "")
+
+            for rev in p.get(
+                "reviews",
+                []
+            )[:5]:
+
+                txt = rev.get(
+                    "text",
+                    {}
+                ).get(
+                    "text",
+                    ""
+                )
+
                 if txt:
-                    # 改行や特殊文字をシンプルにしてパースエラーを防ぐ
-                    clean_txt = txt.replace("\n", " ").replace('"', '’')
-                    review_texts.append(clean_txt)
+
+                    review_texts.append(
+                        txt.replace(
+                            "\n",
+                            " "
+                        )
+                    )
+
 
             places.append({
-                "google_id": p.get("id"),
-                "name": name,
-                "address": p.get("formattedAddress", ""),
-                "rating": rating,
-                "review_count": review_count,
-                "maps_url": p.get("googleMapsUri", f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(name)}"),
-                "regular_opening_hours": p.get("regularOpeningHours"),
-                "open_now_fallback": p.get("currentOpeningHours", {}).get("openNow"),
-                "location": p.get("location"),
-                "photo_urls": photo_urls,
-                "review_texts": " / ".join(review_texts)
+
+                "google_id":
+                    p.get("id"),
+
+                "name":
+                    name,
+
+                "address":
+                    p.get(
+                        "formattedAddress",
+                        ""
+                    ),
+
+                "rating":
+                    rating,
+
+                "review_count":
+                    review_count,
+
+                "maps_url":
+                    p.get(
+                        "googleMapsUri",
+                        ""
+                    ),
+
+                "regular_opening_hours":
+                    p.get(
+                        "regularOpeningHours"
+                    ),
+
+                "open_now_fallback":
+                    p.get(
+                        "currentOpeningHours",
+                        {}
+                    ).get(
+                        "openNow"
+                    ),
+
+                "location":
+                    p.get(
+                        "location"
+                    ),
+
+                "photo_urls":
+                    photo_urls,
+
+                "review_texts":
+                    " / ".join(
+                        review_texts
+                    )
+
             })
 
+
         return places
+
+
+    except Exception as e:
+
+        st.error(
+            f"通信エラー: {e}"
+        )
+
+        return []
 
     except Exception as e:
         st.error(f"通信エラーが発生しました: {str(e)}")

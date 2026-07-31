@@ -152,63 +152,62 @@ def get_trending_by_shares(limit=10):
 # ------------------------------------------------------------
 # Google Routes API 連携 (移動時間計算)
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# Google Distance Matrix API 連携 (移動時間計算)
+# ------------------------------------------------------------
 def get_routes_matrix(origin_str, destinations):
     """
-    Routes API (computeRouteMatrix) を使い、現在地から各目的地への走行時間(秒)を一括取得
+    Google Maps Distance Matrix API を使い、現在地から各目的地への走行時間(秒)を一括取得
+    （住所文字列でもそのまま使えます）
     """
     if not GOOGLE_MAPS_API_KEY or not destinations:
         return {}
 
-    url = "https://routes.googleapis.com/distanceMatrix/v1:computeRouteMatrix"
-
-    headers = {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
-        "X-Goog-FieldMask": "originIndex,destinationIndex,duration,distanceMeters,status"
-    }
-
-    # 出発地 (現在地)
-    if "," in origin_str and not any(c in origin_str for c in ["県", "市", "区", "町"]):
-        try:
-            lat, lng = map(float, origin_str.split(","))
-            origin_waypoint = {"waypoint": {"location": {"latLng": {"latitude": lat, "longitude": lng}}}}
-        except Exception:
-            origin_waypoint = {"waypoint": {"address": origin_str}}
-    else:
-        origin_waypoint = {"waypoint": {"address": origin_str}}
-
-    # 目的地リスト
-    dest_waypoints = []
+    url = "https://maps.googleapis.com/maps/api/distancematrix/json"
+    
+    # 目的地のリストをAPIに渡せる形式に変換
+    dest_strs = []
     for d in destinations:
         loc = d.get("location")
         if loc and "latitude" in loc and "longitude" in loc:
-            dest_waypoints.append({"waypoint": {"location": {"latLng": {"latitude": loc["latitude"], "longitude": loc["longitude"]}}}})
+            dest_strs.append(f"{loc['latitude']},{loc['longitude']}")
         else:
-            dest_waypoints.append({"waypoint": {"address": d.get("address", d.get("name"))}})
+            dest_strs.append(d.get("address", d.get("name")))
 
-    body = {
-        "origins": [origin_waypoint],
-        "destinations": dest_waypoints,
-        "travelMode": "DRIVE",
-        "routingPreference": "TRAFFIC_AWARE"
+    params = {
+        "origins": origin_str,
+        "destinations": "|".join(dest_strs),
+        "key": GOOGLE_MAPS_API_KEY,
+        "mode": "driving",
+        "language": "ja"
     }
 
     try:
-        r = requests.post(url, headers=headers, json=body, timeout=10)
-        if r.status_code != 200:
+        r = requests.get(url, params=params, timeout=10)
+        data = r.json()
+        
+        # ★エラーが起きたら画面に赤文字で理由を出すようにしました
+        if data.get("status") != "OK":
+            st.error(f"Distance Matrix API エラー: {data.get('status')}")
+            if "error_message" in data:
+                st.error(data["error_message"])
             return {}
 
         results = {}
-        for item in r.json():
-            dest_idx = item.get("destinationIndex")
-            duration_str = item.get("duration", "0s")  # 例: "1250s"
-            seconds = int(duration_str.replace("s", "")) if duration_str.endswith("s") else 0
-            results[dest_idx] = seconds
+        rows = data.get("rows", [])
+        if not rows:
+            return {}
+            
+        elements = rows[0].get("elements", [])
+        for idx, element in enumerate(elements):
+            if element.get("status") == "OK":
+                seconds = element.get("duration", {}).get("value", 0)
+                results[idx] = seconds
 
         return results
-    except Exception:
+    except Exception as e:
+        st.error(f"移動時間取得エラー: {str(e)}")
         return {}
-
 # ------------------------------------------------------------
 # 高度な営業時間判定
 # ------------------------------------------------------------

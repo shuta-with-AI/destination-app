@@ -410,7 +410,7 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
        - 定型文（例: おすすめスポットです）は絶対に禁止します。
 
     2. 「popular_menu」:
-       - 口コミ内で「一番人気」「美味しい」「絶対頼むべき」と明確に言及されている商品名を【1つだけ】抽出してください。
+       - 口口コミ内で「一番人気」「美味しい」「絶対頼むべき」と明確に言及されている商品名を【1つだけ】抽出してください。
        - 価格（値段）が口コミ内に数字として明記されている場合のみ「商品名 (○○円)」の形式で書いてください。
        - 口コミから商品名が確認できない、あるいは不確実な場合は絶対にでっち上げず、空文字 "" にしてください。
 
@@ -511,7 +511,7 @@ def main():
         radius_km = st.number_input("圏内(km)を手動入力", min_value=1, max_value=200, value=20) if RANGE_OPTIONS[range_label] is None else RANGE_OPTIONS[range_label]
 
         # ------------------------------------------------------------
-        # ③ 目的（一つの枠内に「チェックボックス」、「ご飯」、「開くボタン」）
+        # ③ 目的（単一の枠の中に [ ] ご望み通りの並び）
         # ------------------------------------------------------------
         st.header("③ 目的")
         selected_keywords = []
@@ -524,28 +524,27 @@ def main():
             if parent_key not in st.session_state:
                 st.session_state[parent_key] = False
 
-            # 一つの枠（コンテナ）の中に3要素を入れる
-            with st.container(border=True):
-                # 1. チェックボックス ＆ 2. カテゴリ名（ご飯等）
-                parent_checked = st.checkbox(f"**{category}**", key=parent_key)
+            # 外枠コンテナを排除し、単一のアコーディオン枠（1本の枠）だけで作成
+            with st.expander(f"**{category}**"):
+                # アコーディオンの先頭（枠内）に一括チェックボックス
+                parent_checked = st.checkbox(f"「{category}」すべて選択", key=parent_key)
+                
+                # 同期処理
+                if parent_checked and not st.session_state.get(f"prev_{parent_key}", False):
+                    for genre_name in genres:
+                        st.session_state[f"chk_{category}_{genre_name}"] = True
+                elif not parent_checked and st.session_state.get(f"prev_{parent_key}", False):
+                    for genre_name in genres:
+                        st.session_state[f"chk_{category}_{genre_name}"] = False
 
-                # 3. 開く用ボタン（タイトルなしで「∨」アイコンのみ）
-                with st.expander("", expanded=False):
-                    for genre_name, genre_keyword in genres.items():
-                        child_key = f"chk_{category}_{genre_name}"
-                        
-                        # 大枠チェックのON/OFFに合わせて一括同期
-                        if parent_checked and not st.session_state.get(f"prev_{parent_key}", False):
-                            st.session_state[child_key] = True
-                        elif not parent_checked and st.session_state.get(f"prev_{parent_key}", False):
-                            st.session_state[child_key] = False
+                st.session_state[f"prev_{parent_key}"] = parent_checked
 
-                        # 個別チェックボックス
-                        is_child_checked = st.checkbox(genre_name, key=child_key)
-                        if is_child_checked:
-                            selected_keywords.append(genre_keyword)
-
-            st.session_state[f"prev_{parent_key}"] = parent_checked
+                # アコーディオンの中に細分化されたジャンルのチェックボックス
+                for genre_name, genre_keyword in genres.items():
+                    child_key = f"chk_{category}_{genre_name}"
+                    is_child_checked = st.checkbox(genre_name, key=child_key)
+                    if is_child_checked:
+                        selected_keywords.append(genre_keyword)
 
         st.subheader("🔍 フリーワード入力")
         free_word = st.text_input("こだわりキーワード (任意)", placeholder="例: 隠れ家, 夜カフェ, 激辛")

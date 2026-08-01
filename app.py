@@ -4,11 +4,11 @@
 ====================
 現在地・ドライブ圏内・目的を入力すると、
 1. 現在地と現在時刻を取得
-2. 選択されたジャンルごとにOR検索（個別リクエスト）を行い、エリア内の全候補を重複排除して統合
-3. Google Distance Matrix API で車移動時間・到着予定時刻を計算し営業判定
-4. 全候補の中から評価（Rating + 口コミ数）順にランキング化し、トップ10を選出
-5. Gemini API でトップ10店舗の口コミから「おすすめの客層・理由」と「具体的なメニュー3選」を抽出
-6. ナビ案内、インスタ検索、シェア機能を提供する。
+2. 選択されたジャンルごとにOR検索を行い、エリア内の候補を重複排除して統合（ページネーション対応で取得数増）
+3. Google Distance Matrix API で車移動時間・到着予定時刻を計算し、タイムゾーンを合わせて正確に営業判定
+4. 全候補の中から評価（Rating + log10口コミ数）順にランキング化し、トップ10を選出
+5. Gemini API の厳密なプロンプトで、トップ10店舗の口コミから「20文字の要約魅力」と「確実な一番人気メニュー1品」を抽出
+6. 写真（最大3枚）、各種案内（ナビ・インスタ・シェア）を提供する。
 """
 
 import streamlit as st
@@ -239,6 +239,8 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
             
         if (open_minutes <= arrival_minutes < close_minutes) or (open_minutes <= (arrival_minutes + 7 * 24 * 60) < close_minutes):
             c_hour, c_min = close_info.get("hour", 0), close_info.get("minute", 0)
+            
+            # タイムゾーンを一致させてエラーを防止
             close_time_obj = datetime.time(c_hour, c_min)
             close_dt = datetime.datetime.combine(arrival_dt.date(), close_time_obj, tzinfo=arrival_dt.tzinfo)
             lo_dt = close_dt - datetime.timedelta(minutes=30)
@@ -252,7 +254,7 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
     return False, "営業時間外", "営業時間外"
 
 # ------------------------------------------------------------
-# 1クエリ用テキスト検索ヘルパー
+# 1クエリ用テキスト検索ヘルパー（ページネーション追加で取得数UP）
 # ------------------------------------------------------------
 def _fetch_places_single_query(lat, lng, radius_km, query):
     url = "https://places.googleapis.com/v1/places:searchText"
@@ -263,36 +265,52 @@ def _fetch_places_single_query(lat, lng, radius_km, query):
             "places.id,places.displayName,places.formattedAddress,places.rating,"
             "places.userRatingCount,places.regularOpeningHours,"
             "places.currentOpeningHours.openNow,places.googleMapsUri,"
-            "places.location,places.photos,places.reviews,places.types"
+            "places.location,places.photos,places.reviews,places.types,nextPageToken"
         ),
     }
-    body = {
-        "textQuery": query,
-        "maxResultCount": 20,
-        "locationBias": {
-            "circle": {
-                "center": {"latitude": lat, "longitude": lng},
-                "radius": min(radius_km * 1000, 50000)
+    
+    all_places = []
+    next_page_token = None
+    
+    # 1キーワードにつき最大2ページ（40件）まで取得
+    for _ in range(2):
+        body = {
+            "textQuery": query,
+            "maxResultCount": 20,
+            "locationBias": {
+                "circle": {
+                    "center": {"latitude": lat, "longitude": lng},
+                    "radius": min(radius_km * 1000, 50000)
+                }
             }
         }
-    }
-    try:
-        r = requests.post(url, headers=headers, json=body, timeout=10)
-        if r.status_code == 200:
-            return r.json().get("places", [])
-    except Exception:
-        pass
-    return []
+        if next_page_token:
+            body["pageToken"] = next_page_token
+            
+        try:
+            r = requests.post(url, headers=headers, json=body, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                all_places.extend(data.get("places", []))
+                next_page_token = data.get("nextPageToken")
+                if not next_page_token: break
+                time.sleep(1.5)
+            else:
+                break
+        except Exception:
+            break
+            
+    return all_places
 
 # ------------------------------------------------------------
-# Google Places API OR検索（複数単語の論理和 A ∨ B ∨ C）
+# Google Places API OR検索（写真最大3枚対応）
 # ------------------------------------------------------------
 def search_places_or_conditions(location_str, radius_km, keywords_list):
     if not GOOGLE_MAPS_API_KEY: return []
     lat, lng = geocode_location(location_str)
     if lat is None or lng is None: return []
 
-    unwanted_name_keywords = ["ホテル", "hotel", "旅館", "宿", "シネマ", "cinema", "映画館", "マクドナルド", "すき家", "吉野家"]
+    unwanted_name_keywords = ["ホテル", "hotel", "旅館", "宿", "シネマ", "cinema", "映画館", "マクドナルド", "すき家", "吉野家", "松屋", "ガスト", "サイゼリヤ"]
     
     seen_ids = set()
     places = []
@@ -309,8 +327,10 @@ def search_places_or_conditions(location_str, radius_km, keywords_list):
             if any(x in name_check.lower() for x in unwanted_name_keywords): continue
 
             seen_ids.add(pid)
+            
+            # 写真を最大3枚取得
             photo_urls = []
-            for photo in p.get("photos", [])[:2]:
+            for photo in p.get("photos", [])[:3]:
                 photo_name = photo.get("name")
                 if photo_name:
                     photo_urls.append(f"https://places.googleapis.com/v1/{photo_name}/media?key={GOOGLE_MAPS_API_KEY}&maxHeightPx=400&maxWidthPx=400")
@@ -334,7 +354,7 @@ def search_places_or_conditions(location_str, radius_km, keywords_list):
     return places
 
 # ------------------------------------------------------------
-# メイン処理 (OR検索全件取得 -> 時間判定 -> 評価順ソート -> Gemini)
+# メイン処理 (Gemini抽出の厳格化・定型文撤廃)
 # ------------------------------------------------------------
 def run_search(location_str, radius_km, keywords_list, min_rating):
     if not client:
@@ -343,12 +363,10 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
 
     now = datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
     
-    # 1. OR検索（A ∨ B ∨ C）で全候補を取得
     raw_places = search_places_or_conditions(location_str, radius_km, keywords_list)
     st.caption(f"OR条件で検索・ヒットした統合店舗数: {len(raw_places)} 件")
     if not raw_places: return []
 
-    # 2. ルート移動時間計算 ＆ 営業中判定
     durations_map = get_routes_matrix(location_str, raw_places)
     open_places = []
     
@@ -373,33 +391,43 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
     st.caption(f"営業中かつ条件合致件数: {len(open_places)} 件")
     if not open_places: return []
 
-    # 3. 評価スコア順に並べてトップ10を選出
     open_places.sort(key=lambda x: x["score"], reverse=True)
     top_10_places = open_places[:10]
 
-    # 4. Gemini API に口コミを渡し、「どんな人向けか/何が人気か」と「具体的なメニュー3選」を抽出
     input_list_for_gemini = [
         {"google_id": p["google_id"], "name": p["name"], "reviews": p["review_texts"] if p["review_texts"] else "特になし"}
         for p in top_10_places
     ]
 
     prompt = f"""
-    あなたはドライブの目的地提案アシスタントです。
-    以下の【店舗リスト（口コミデータ付き）】の各店舗について、代表メニューと魅力を抽出し、JSONフォーマットで出力してください。
+    あなたはデータ抽出のプロフェッショナルです。
+    提供された【店舗情報および口コミ】のみを厳格に分析し、指定されたフォーマットのJSONを出力してください。
 
     【店舗リスト】
     {json.dumps(input_list_for_gemini, ensure_ascii=False)}
 
-    【出力ルール】
-    - リスト内のすべての店舗（google_id）に対してデータを作成してください。
-    - 「popular_menu」: 口コミから具体的なメニュー名（価格が推測・記載されていれば併記し、どんなメニューかの簡単な説明も添えて）を3つ抽出してください。口コミに具体的な記載がない場合は、店舗名やジャンルから「最も定番で頼むべきメニュー」を具体的に想像して3つ書いてください。空配列は禁止です。
-    - 「buzz_reason」: 口コミや店舗情報をもとに、「どんな人におすすめか」「どんな商品や体験が人気なのか」がはっきりと伝わるように、1文で魅力的に要約してください。
-    - 以下のJSON配列フォーマットのみを出力してください（Markdown表記は不要）。
+    【絶対厳守の抽出ルール】
+    1. 「buzz_reason」: 
+       - 口コミ内で多くの人が褒めている内容から、「何がどう人気なのか」を【20文字程度（必ず25文字以内）】の1文で要約してください。
+       - 外部知識や一般的な推測は一切禁止し、提供された口コミ本文に書かれている事実のみに基づいて記述してください。
+       - 定型文（例: おすすめスポットです）は絶対に禁止します。
+
+    2. 「popular_menu」:
+       - 口コミ内で「一番人気」「美味しい」「絶対頼むべき」と明確に言及されている商品名を【1つだけ】抽出してください。
+       - 価格（値段）が口コミ内に数字として明記されている場合のみ「商品名 (○○円)」の形式で書いてください。
+       - 口コミから商品名が確認できない、あるいは不確実な場合は絶対にでっち上げず、空文字 "" にしてください。
+
+    3. 「ファクトチェック（嘘の禁止）」:
+       - 口コミ本文に直接的な根拠がない情報は一切出力してはいけません。
+       - 推測や固定観念による補完は禁止します。確実なデータがない場合は空欄（""）にしてください。
+
+    【出力フォーマット】
+    必ず以下のJSON配列形式のみを出力してください（Markdown記法や説明文は含めないでください）。
     [
       {{
         "google_id": "入力されたgoogle_id",
-        "popular_menu": ["濃厚とんこつラーメン (約850円) - 濃厚なスープが特徴", "手作り餃子 (約400円) - 肉汁たっぷり", "チャーシュー丼 (約350円)"],
-        "buzz_reason": "こってり系が好きな学生や、深夜にガッツリ食べたい方に大人気のラーメン店です！"
+        "popular_menu": "一番人気の代表商品名 (○○円)", 
+        "buzz_reason": "こってり濃厚スープと極細麺が大人気。"
       }}
     ]
     """
@@ -412,7 +440,6 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         gemini_text = response.text.strip()
-        # 万が一Markdown記法が混ざった場合の安全処理
         if gemini_text.startswith("```json"): gemini_text = gemini_text[7:]
         if gemini_text.startswith("```"): gemini_text = gemini_text[3:]
         if gemini_text.endswith("```"): gemini_text = gemini_text[:-3]
@@ -428,6 +455,11 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
         place_id = p["google_id"] or hashlib.md5(p["name"].encode()).hexdigest()
         save_snapshot(place_id, p["name"], p["review_count"], p["rating"])
         
+        menu_item = g_data.get("popular_menu", "")
+        # 空文字や無意味な文字列を確実に除外
+        if menu_item in ["なし", "不明", "なし (不明円)"]:
+            menu_item = ""
+        
         candidates.append({
             "place_id": place_id,
             "name": p["name"],
@@ -440,9 +472,9 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
             "last_order_str": p["last_order_str"],
             "address": p["address"],
             "maps_url": p["maps_url"],
-            "buzz_reason": g_data.get("buzz_reason", "ドライブにおすすめの素敵なスポットです！"),
+            "buzz_reason": g_data.get("buzz_reason", ""),
             "photo_urls": p["photo_urls"],
-            "popular_menu": g_data.get("popular_menu", ["おすすめの定番メニュー", "人気の一品", "こだわりの商品"]),
+            "popular_menu": menu_item,
         })
 
     return candidates
@@ -496,7 +528,6 @@ def main():
 
         st.header("④ 条件")
         min_rating = st.slider("最低評価", 1.0, 5.0, 3.0, 0.1)
-        # ※予算目安スライダーはご要望により削除しました
 
         search_clicked = st.button("🔍 検索する", type="primary", use_container_width=True)
 
@@ -531,19 +562,21 @@ def main():
                         with cols[0]:
                             st.subheader(r["name"])
                             
+                            # 写真を最大3枚きれいに表示
                             if r.get("photo_urls"):
-                                img_cols = st.columns(min(len(r["photo_urls"]), 2))
-                                for i, img_url in enumerate(r["photo_urls"][:2]):
+                                img_cols = st.columns(min(len(r["photo_urls"]), 3))
+                                for i, img_url in enumerate(r["photo_urls"][:3]):
                                     with img_cols[i]: st.image(img_url, use_container_width=True)
 
-                            # 抽出した「おすすめの理由（どんな人に・何が人気か）」を強調して表示
-                            st.info(f"💡 {r['buzz_reason']}")
+                            # 抽出できた場合のみ「おすすめ理由」を表示（定型文は出さない）
+                            if r.get("buzz_reason"):
+                                st.info(f"💡 {r['buzz_reason']}")
 
-                            st.write("🍽️ **おすすめ・人気メニュー**")
-                            for item in r["popular_menu"]: 
-                                st.write(f"- {item}")
+                            # 抽出できた場合のみ一番人気商品を表示
+                            if r.get("popular_menu"):
+                                st.write(f"👑 **一番人気**: {r['popular_menu']}")
 
-                            st.write(f"📍 {r['address']}")
+                            st.write(f"📍 住所: {r['address']}")
                             st.write(f"⭐ 評価: {r['rating']} ({r['review_count']}件)")
                             st.write(f"🚗 所要時間目安: 約 {r['drive_time_min']} 分 (到着予定: {r['arrival_dt'].strftime('%H:%M')})")
                             st.write(f"⏳ 閉店時間: **{r['closing_time_str']}**（LO: **{r['last_order_str']}**）")

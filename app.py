@@ -171,8 +171,16 @@ def geocode_location(location_str):
         except Exception:
             pass
     url = "https://places.googleapis.com/v1/places:searchText"
-    headers = {"Content-Type": "application/json", "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY, "X-Goog-FieldMask": "places.location"}
-    body = {"textQuery": location_str, "maxResultCount": 1}
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+        "X-Goog-FieldMask": "places.location"
+    }
+    body = {
+        "textQuery": location_str,
+        "maxResultCount": 1,
+        "languageCode": "ja" # 日本語明記
+    }
     try:
         r = requests.post(url, headers=headers, json=body, timeout=5)
         if r.status_code == 200:
@@ -253,7 +261,7 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
     return False, "営業時間外", "営業時間外"
 
 # ------------------------------------------------------------
-# 1クエリ用テキスト検索ヘルパー
+# 1クエリ用テキスト検索ヘルパー (日本語取得を明示)
 # ------------------------------------------------------------
 def _fetch_places_single_query(lat, lng, radius_km, query):
     url = "https://places.googleapis.com/v1/places:searchText"
@@ -275,6 +283,7 @@ def _fetch_places_single_query(lat, lng, radius_km, query):
         body = {
             "textQuery": query,
             "maxResultCount": 20,
+            "languageCode": "ja", # ⭐ 日本語住所・店舗名を固定で取得
             "locationBias": {
                 "circle": {
                     "center": {"latitude": lat, "longitude": lng},
@@ -481,10 +490,6 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
 def main():
     init_db()
     
-    # ------------------------------------------------------------
-    # CSSの裏技：アコーディオンの枠線を消し、外側のContainerと一体化させる
-    # これにより「1つの枠内に[ ] ご飯 ∨ が一直線に並ぶ」ように見せます
-    # ------------------------------------------------------------
     st.markdown("""
     <style>
     div[data-testid="stExpander"] details {
@@ -495,7 +500,6 @@ def main():
         border: none !important;
         box-shadow: none !important;
     }
-    /* チェックボックスをテキストの高さと揃える微調整 */
     div[data-testid="stCheckbox"] {
         margin-top: 0.15rem;
     }
@@ -532,9 +536,6 @@ def main():
         range_label = st.radio("圏内を選択", list(RANGE_OPTIONS.keys()))
         radius_km = st.number_input("圏内(km)を手動入力", min_value=1, max_value=200, value=20) if RANGE_OPTIONS[range_label] is None else RANGE_OPTIONS[range_label]
 
-        # ------------------------------------------------------------
-        # ③ 目的（[ ] ご飯 ∨ が一つの枠に収まったレイアウト）
-        # ------------------------------------------------------------
         st.header("③ 目的")
         selected_keywords = []
 
@@ -542,27 +543,20 @@ def main():
             genres = cat_info["ジャンル"]
             parent_key = f"parent_{category}"
 
-            # 初期化
             if parent_key not in st.session_state:
                 st.session_state[parent_key] = False
 
-            # 一つの枠（コンテナ）を作成
             with st.container(border=True):
-                # コンテナの中で2列に分け、チェックボックスとアコーディオンを並べる
                 col1, col2 = st.columns([1, 7], gap="small")
                 
                 with col1:
-                    # ラベル名を消し、純粋なチェックボックス（四角）のみを配置
                     parent_checked = st.checkbox(" ", key=parent_key, label_visibility="collapsed")
                     
                 with col2:
-                    # アコーディオン（枠線は上のCSSで消えているので、文字と∨ボタンだけに見える）
                     with st.expander(f"**{category}**"):
-                        # 中を開くと、一切のテキストやボタンがなく、詳細ジャンルだけが並ぶ
                         for genre_name, genre_keyword in genres.items():
                             child_key = f"chk_{category}_{genre_name}"
                             
-                            # 大枠チェックのON/OFFに合わせて一括同期
                             if parent_checked and not st.session_state.get(f"prev_{parent_key}", False):
                                 st.session_state[child_key] = True
                             elif not parent_checked and st.session_state.get(f"prev_{parent_key}", False):

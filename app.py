@@ -6,8 +6,8 @@ For Spontaneous Drivers 🚗
 1. 現在地と現在時刻を取得
 2. 選択されたジャンルごとにOR検索を行い、エリア内の候補を重複排除して統合
 3. Google Distance Matrix API で車移動時間・到着予定時刻を計算し営業判定
-4. 全候補の中から評価（Rating + log10口コミ数）順にランキング化し、トップ10を選出
-5. Gemini API でトップ10店舗の口コミから「20文字の要約魅力」と「確実な一番人気メニュー1品」を抽出
+4. 全候補の中から評価（Rating + log10口コミ数）順にランキング化（全件表示）
+5. Gemini API で候補店舗の口コミから「20文字の要約魅力」と「確実な一番人気メニュー1品」を抽出
 6. 写真（最大3枚）、各種案内（ナビ・インスタ・シェア）を提供する。
 """
 
@@ -20,6 +20,7 @@ import hashlib
 import urllib.parse
 import requests
 import time
+import re
 from google import genai
 from google.genai import types
 from zoneinfo import ZoneInfo
@@ -75,6 +76,16 @@ RANGE_OPTIONS = {
     "30〜50km": 50,
     "手動入力": None,
 }
+
+# ------------------------------------------------------------
+# ヘルパー関数: 住所から「日本、」を取り除く
+# ------------------------------------------------------------
+def clean_address(address_str):
+    if not address_str:
+        return ""
+    # 先頭の「日本、」「日本 」「〒XXX-XXXX 日本、」などを除去
+    cleaned = re.sub(r"^(〒?\d{3}-\d{4}\s*)?日本[、,\s]*", "", address_str)
+    return cleaned
 
 # ------------------------------------------------------------
 # DB処理 (SQLite)
@@ -179,7 +190,7 @@ def geocode_location(location_str):
     body = {
         "textQuery": location_str,
         "maxResultCount": 1,
-        "languageCode": "ja" # 日本語明記
+        "languageCode": "ja"
     }
     try:
         r = requests.post(url, headers=headers, json=body, timeout=5)
@@ -261,7 +272,7 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
     return False, "営業時間外", "営業時間外"
 
 # ------------------------------------------------------------
-# 1クエリ用テキスト検索ヘルパー (日本語取得を明示)
+# 1クエリ用テキスト検索ヘルパー
 # ------------------------------------------------------------
 def _fetch_places_single_query(lat, lng, radius_km, query):
     url = "https://places.googleapis.com/v1/places:searchText"
@@ -283,7 +294,7 @@ def _fetch_places_single_query(lat, lng, radius_km, query):
         body = {
             "textQuery": query,
             "maxResultCount": 20,
-            "languageCode": "ja", # ⭐ 日本語住所・店舗名を固定で取得
+            "languageCode": "ja",
             "locationBias": {
                 "circle": {
                     "center": {"latitude": lat, "longitude": lng},
@@ -346,7 +357,7 @@ def search_places_or_conditions(location_str, radius_km, keywords_list):
             places.append({
                 "google_id": pid,
                 "name": name_check,
-                "address": p.get("formattedAddress", ""),
+                "address": clean_address(p.get("formattedAddress", "")), # ⭐ 住所クリーニング適用
                 "rating": float(p.get("rating", 0)),
                 "review_count": int(p.get("userRatingCount", 0)),
                 "maps_url": p.get("googleMapsUri", ""),
@@ -397,12 +408,15 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
     st.caption(f"営業中かつ条件合致件数: {len(open_places)} 件")
     if not open_places: return []
 
+    # スコア（評価＋口コミ数補正）が高い順に全件ソート
     open_places.sort(key=lambda x: x["score"], reverse=True)
-    top_10_places = open_places[:10]
+    
+    # ⭐ 全件表示対象に変更
+    all_ranked_places = open_places
 
     input_list_for_gemini = [
         {"google_id": p["google_id"], "name": p["name"], "reviews": p["review_texts"] if p["review_texts"] else "特になし"}
-        for p in top_10_places
+        for p in all_ranked_places
     ]
 
     prompt = f"""
@@ -456,7 +470,7 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
         pass
 
     candidates = []
-    for p in top_10_places:
+    for p in all_ranked_places:
         g_data = gemini_map.get(p["google_id"], {})
         place_id = p["google_id"] or hashlib.md5(p["name"].encode()).hexdigest()
         save_snapshot(place_id, p["name"], p["review_count"], p["rating"])
@@ -506,8 +520,8 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.title("目的地コンサルタント")
-    st.caption("今の気分で選ぶだけ。今から行ける『とっておき』を提案します。")
+    st.title("For Spontaneous Drivers 🚗")
+    st.caption("思いつきのドライブに。現在地と目的から、今すぐ行ける最高のスポットを提案します。")
 
     if not GEMINI_API_KEY or not GOOGLE_MAPS_API_KEY:
         st.warning("APIキーが未設定です。`Secrets` に `GEMINI_API_KEY` および `GOOGLE_MAPS_API_KEY` を設定してください。")
@@ -601,11 +615,11 @@ def main():
                 if not results:
                     st.info("条件に合う営業中のスポットが見つかりませんでした。目的を変更するか最低評価を下げる・範囲を広げて再試行してください。")
 
-                for r in results:
+                for rank, r in enumerate(results, start=1):
                     with st.container(border=True):
                         cols = st.columns([3, 1])
                         with cols[0]:
-                            st.subheader(r["name"])
+                            st.subheader(f"{rank}位：{r['name']}")
                             
                             # 写真最大3枚表示
                             if r.get("photo_urls"):

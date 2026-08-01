@@ -524,13 +524,13 @@ def main():
             if parent_key not in st.session_state:
                 st.session_state[parent_key] = False
 
-            # 1つの枠囲み（コンテナ）を作成
+            # 一つの枠（コンテナ）の中に3要素を入れる
             with st.container(border=True):
-                # 枠の中に「チェックボックス付きのご飯」
+                # 1. チェックボックス ＆ 2. カテゴリ名（ご飯等）
                 parent_checked = st.checkbox(f"**{category}**", key=parent_key)
 
-                # 枠の中に「開く用ボタン（アコーディオン）」
-                with st.expander("詳細"):
+                # 3. 開く用ボタン（タイトルなしで「∨」アイコンのみ）
+                with st.expander("", expanded=False):
                     for genre_name, genre_keyword in genres.items():
                         child_key = f"chk_{category}_{genre_name}"
                         
@@ -540,7 +540,7 @@ def main():
                         elif not parent_checked and st.session_state.get(f"prev_{parent_key}", False):
                             st.session_state[child_key] = False
 
-                        # 細かいチェックボックス
+                        # 個別チェックボックス
                         is_child_checked = st.checkbox(genre_name, key=child_key)
                         if is_child_checked:
                             selected_keywords.append(genre_keyword)

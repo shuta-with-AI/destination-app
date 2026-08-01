@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-ドライブ先提案アプリ
-====================
+For Spontaneous Drivers 🚗
+===========================
 現在地・ドライブ圏内・目的を入力すると、
 1. 現在地と現在時刻を取得
-2. 選択されたジャンルごとにOR検索を行い、エリア内の候補を重複排除して統合（ページネーション対応で取得数増）
-3. Google Distance Matrix API で車移動時間・到着予定時刻を計算し、タイムゾーンを合わせて正確に営業判定
+2. 選択されたジャンルごとにOR検索を行い、エリア内の候補を重複排除して統合
+3. Google Distance Matrix API で車移動時間・到着予定時刻を計算し営業判定
 4. 全候補の中から評価（Rating + log10口コミ数）順にランキング化し、トップ10を選出
-5. Gemini API の厳密なプロンプトで、トップ10店舗の口コミから「20文字の要約魅力」と「確実な一番人気メニュー1品」を抽出
+5. Gemini API でトップ10店舗の口コミから「20文字の要約魅力」と「確実な一番人気メニュー1品」を抽出
 6. 写真（最大3枚）、各種案内（ナビ・インスタ・シェア）を提供する。
 """
 
@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 # ------------------------------------------------------------
 # 初期設定
 # ------------------------------------------------------------
-st.set_page_config(page_title="ドライブ先提案アプリ", page_icon="🚗", layout="wide")
+st.set_page_config(page_title="For Spontaneous Drivers", page_icon="🚗", layout="wide")
 
 DB_PATH = "drive_app_data.db"
 
@@ -240,7 +240,6 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
         if (open_minutes <= arrival_minutes < close_minutes) or (open_minutes <= (arrival_minutes + 7 * 24 * 60) < close_minutes):
             c_hour, c_min = close_info.get("hour", 0), close_info.get("minute", 0)
             
-            # タイムゾーンを一致させてエラーを防止
             close_time_obj = datetime.time(c_hour, c_min)
             close_dt = datetime.datetime.combine(arrival_dt.date(), close_time_obj, tzinfo=arrival_dt.tzinfo)
             lo_dt = close_dt - datetime.timedelta(minutes=30)
@@ -254,7 +253,7 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
     return False, "営業時間外", "営業時間外"
 
 # ------------------------------------------------------------
-# 1クエリ用テキスト検索ヘルパー（ページネーション追加で取得数UP）
+# 1クエリ用テキスト検索ヘルパー
 # ------------------------------------------------------------
 def _fetch_places_single_query(lat, lng, radius_km, query):
     url = "https://places.googleapis.com/v1/places:searchText"
@@ -272,7 +271,6 @@ def _fetch_places_single_query(lat, lng, radius_km, query):
     all_places = []
     next_page_token = None
     
-    # 1キーワードにつき最大2ページ（40件）まで取得
     for _ in range(2):
         body = {
             "textQuery": query,
@@ -303,7 +301,7 @@ def _fetch_places_single_query(lat, lng, radius_km, query):
     return all_places
 
 # ------------------------------------------------------------
-# Google Places API OR検索（写真最大3枚対応）
+# Google Places API OR検索
 # ------------------------------------------------------------
 def search_places_or_conditions(location_str, radius_km, keywords_list):
     if not GOOGLE_MAPS_API_KEY: return []
@@ -328,7 +326,6 @@ def search_places_or_conditions(location_str, radius_km, keywords_list):
 
             seen_ids.add(pid)
             
-            # 写真を最大3枚取得
             photo_urls = []
             for photo in p.get("photos", [])[:3]:
                 photo_name = photo.get("name")
@@ -354,7 +351,7 @@ def search_places_or_conditions(location_str, radius_km, keywords_list):
     return places
 
 # ------------------------------------------------------------
-# メイン処理 (Gemini抽出の厳格化・定型文撤廃)
+# メイン処理 (全件ソート -> Gemini抽出)
 # ------------------------------------------------------------
 def run_search(location_str, radius_km, keywords_list, min_rating):
     if not client:
@@ -456,7 +453,6 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
         save_snapshot(place_id, p["name"], p["review_count"], p["rating"])
         
         menu_item = g_data.get("popular_menu", "")
-        # 空文字や無意味な文字列を確実に除外
         if menu_item in ["なし", "不明", "なし (不明円)"]:
             menu_item = ""
         
@@ -484,8 +480,8 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
 # ------------------------------------------------------------
 def main():
     init_db()
-    st.title("行き先に悩む全てのドライバーへ")
-    st.caption("現在地・距離・目的を入力すると、営業中の話題のスポットを提案します")
+    st.title("For Spontaneous Drivers 🚗")
+    st.caption("思いつきのドライブに。現在地と目的から、今すぐ行ける最高のスポットを提案します。")
 
     if not GEMINI_API_KEY or not GOOGLE_MAPS_API_KEY:
         st.warning("APIキーが未設定です。`Secrets` に `GEMINI_API_KEY` および `GOOGLE_MAPS_API_KEY` を設定してください。")
@@ -514,14 +510,43 @@ def main():
         range_label = st.radio("圏内を選択", list(RANGE_OPTIONS.keys()))
         radius_km = st.number_input("圏内(km)を手動入力", min_value=1, max_value=200, value=20) if RANGE_OPTIONS[range_label] is None else RANGE_OPTIONS[range_label]
 
+        # ------------------------------------------------------------
+        # ③ 目的（大枠チェックボックス ＋ 折りたたみの連動UI）
+        # ------------------------------------------------------------
         st.header("③ 目的")
         selected_keywords = []
+
         for category, cat_info in PURPOSE_DATA.items():
             genres = cat_info["ジャンル"]
-            with st.expander(category):
+            parent_key = f"parent_{category}"
+
+            # 初期化
+            if parent_key not in st.session_state:
+                st.session_state[parent_key] = False
+
+            # 親チェックボックスと折りたたみの横並び表示
+            c_check, c_exp = st.columns([1, 4])
+            
+            # 1. 親（大枠）チェックボックス
+            parent_checked = c_check.checkbox("", key=parent_key, help=f"{category}の全ジャンルを選択")
+            
+            # 2. 折りたたみ（詳細ジャンル）
+            with c_exp.expander(f"**{category}**"):
                 for genre_name, genre_keyword in genres.items():
-                    if st.checkbox(genre_name, key=f"chk_{genre_name}"):
+                    child_key = f"chk_{category}_{genre_name}"
+                    
+                    # 親の状態に合わせて子を連動制御（セッション状態の更新）
+                    if parent_checked and not st.session_state.get(f"prev_{parent_key}", False):
+                        st.session_state[child_key] = True
+                    elif not parent_checked and st.session_state.get(f"prev_{parent_key}", False):
+                        st.session_state[child_key] = False
+
+                    # 個別のチェックボックス表示
+                    is_child_checked = st.checkbox(genre_name, key=child_key)
+                    if is_child_checked:
                         selected_keywords.append(genre_keyword)
+
+            st.session_state[f"prev_{parent_key}"] = parent_checked
 
         st.subheader("🔍 フリーワード入力")
         free_word = st.text_input("こだわりキーワード (任意)", placeholder="例: 隠れ家, 夜カフェ, 激辛")
@@ -538,7 +563,7 @@ def main():
             if not location_str:
                 st.error("現在地を指定してください。")
             else:
-                with st.spinner("圏内のスポットをOR検索＆ルート計算中..."):
+                with st.spinner("圏内のスポットを検索＆ルート計算中..."):
                     search_keywords_list = []
                     
                     if selected_keywords:
@@ -562,17 +587,17 @@ def main():
                         with cols[0]:
                             st.subheader(r["name"])
                             
-                            # 写真を最大3枚きれいに表示
+                            # 写真最大3枚表示
                             if r.get("photo_urls"):
                                 img_cols = st.columns(min(len(r["photo_urls"]), 3))
                                 for i, img_url in enumerate(r["photo_urls"][:3]):
                                     with img_cols[i]: st.image(img_url, use_container_width=True)
 
-                            # 抽出できた場合のみ「おすすめ理由」を表示（定型文は出さない）
+                            # 20文字以内の魅力要約
                             if r.get("buzz_reason"):
                                 st.info(f"💡 {r['buzz_reason']}")
 
-                            # 抽出できた場合のみ一番人気商品を表示
+                            # 確実な一番人気メニュー1品
                             if r.get("popular_menu"):
                                 st.write(f"👑 **一番人気**: {r['popular_menu']}")
 

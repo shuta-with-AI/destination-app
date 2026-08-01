@@ -511,7 +511,7 @@ def main():
         radius_km = st.number_input("圏内(km)を手動入力", min_value=1, max_value=200, value=20) if RANGE_OPTIONS[range_label] is None else RANGE_OPTIONS[range_label]
 
         # ------------------------------------------------------------
-        # ③ 目的（枠内に「大枠チェックボックス」と「子要素チェックボックス」を並べて配置）
+        # ③ 目的（1つの枠の中に「大枠チェック」と「デフォルト閉じた折りたたみ」を配置）
         # ------------------------------------------------------------
         st.header("③ 目的")
         selected_keywords = []
@@ -524,25 +524,26 @@ def main():
             if parent_key not in st.session_state:
                 st.session_state[parent_key] = False
 
-            # シンプルにコンテナ枠で全体を囲む
+            # 1つの枠囲み（コンテナ）を作成
             with st.container(border=True):
-                # 大枠（親）のチェックボックス
+                # 枠の中に「大枠のチェックボックス」
                 parent_checked = st.checkbox(f"**{category}**", key=parent_key)
 
-                # 枠の中にそのまま子要素のチェックボックスを展開
-                for genre_name, genre_keyword in genres.items():
-                    child_key = f"chk_{category}_{genre_name}"
-                    
-                    # 大枠チェックの変更に合わせて配下の全選択/全解除を行う
-                    if parent_checked and not st.session_state.get(f"prev_{parent_key}", False):
-                        st.session_state[child_key] = True
-                    elif not parent_checked and st.session_state.get(f"prev_{parent_key}", False):
-                        st.session_state[child_key] = False
+                # 枠の中に「折りたたみ（デフォルトで閉じた状態）」
+                with st.expander("ジャンルを細かく選択"):
+                    for genre_name, genre_keyword in genres.items():
+                        child_key = f"chk_{category}_{genre_name}"
+                        
+                        # 大枠チェックのON/OFFに合わせて一括同期
+                        if parent_checked and not st.session_state.get(f"prev_{parent_key}", False):
+                            st.session_state[child_key] = True
+                        elif not parent_checked and st.session_state.get(f"prev_{parent_key}", False):
+                            st.session_state[child_key] = False
 
-                    # 個別チェックボックス
-                    is_child_checked = st.checkbox(genre_name, key=child_key)
-                    if is_child_checked:
-                        selected_keywords.append(genre_keyword)
+                        # 個別チェックボックス
+                        is_child_checked = st.checkbox(genre_name, key=child_key)
+                        if is_child_checked:
+                            selected_keywords.append(genre_keyword)
 
             st.session_state[f"prev_{parent_key}"] = parent_checked
 

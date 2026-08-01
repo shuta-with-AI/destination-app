@@ -511,7 +511,7 @@ def main():
         radius_km = st.number_input("圏内(km)を手動入力", min_value=1, max_value=200, value=20) if RANGE_OPTIONS[range_label] is None else RANGE_OPTIONS[range_label]
 
         # ------------------------------------------------------------
-        # ③ 目的（枠内一括チェックボックス ＋ 折りたたみUI）
+        # ③ 目的（大枠チェックボックス ＋ 折りたたみの並列UI）
         # ------------------------------------------------------------
         st.header("③ 目的")
         selected_keywords = []
@@ -524,21 +524,24 @@ def main():
             if parent_key not in st.session_state:
                 st.session_state[parent_key] = False
 
-            with st.expander(f"**{category}**"):
-                # 枠内の一番上に「全体選択」用チェックボックスを配置
-                parent_checked = st.checkbox(f"「{category}」すべて選択", key=parent_key)
-                st.divider() # きれいな区切り線
-
+            # チェックボックスと折りたたみを横並びに配置
+            c_check, c_exp = st.columns([1, 5])
+            
+            # 大枠のチェックボックス
+            parent_checked = c_check.checkbox("", key=parent_key)
+            
+            # 大枠のアコーディオン（開くと細かいジャンルが出る）
+            with c_exp.expander(category):
                 for genre_name, genre_keyword in genres.items():
                     child_key = f"chk_{category}_{genre_name}"
                     
-                    # 親（全体選択）の変更に合わせて子のセッション状態を同期
+                    # 大枠のチェック状態に合わせて一括選択/一括解除
                     if parent_checked and not st.session_state.get(f"prev_{parent_key}", False):
                         st.session_state[child_key] = True
                     elif not parent_checked and st.session_state.get(f"prev_{parent_key}", False):
                         st.session_state[child_key] = False
 
-                    # 個別チェックボックス
+                    # 細かいチェックボックス
                     is_child_checked = st.checkbox(genre_name, key=child_key)
                     if is_child_checked:
                         selected_keywords.append(genre_keyword)

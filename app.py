@@ -4,10 +4,10 @@
 ====================
 現在地・ドライブ圏内・目的を入力すると、
 1. 現在地と現在時刻を取得
-2. Google Places API (Text Search New) でページネーションを行い、エリア内の全該当店舗（最大60件）を取得
-3. Google Distance Matrix API で車移動時間・到着予定時刻を計算し、ラストオーダー/閉店時間に間に合うか厳密判定
-4. 営業中の全店舗を評価（Rating）順にランキング化し、トップ10を選出
-5. Gemini API でトップ10店舗の口コミから代表メニュー3選と魅力を自動抽出・要約
+2. 選択されたジャンルごとにOR検索（個別リクエスト）を行い、エリア内の全候補を重複排除して統合
+3. Google Distance Matrix API で車移動時間・到着予定時刻を計算し営業判定
+4. 全候補の中から評価（Rating + 口コミ数）順にランキング化し、トップ10を選出
+5. Gemini API でトップ10店舗の口コミから代表メニュー3選と魅力を自動抽出
 6. ナビ案内、インスタ検索、シェア機能を提供する。
 """
 
@@ -42,29 +42,29 @@ if GEMINI_API_KEY:
 PURPOSE_DATA = {
     "ご飯": {
         "ジャンル": {
-            "ラーメン": "ラーメン 中華そば つけ麺",
-            "ハンバーガー": "ハンバーガー グルメバーガー",
-            "レストラン・洋食": "レストラン 洋食 ハンバーグ",
-            "和食・定食": "定食 和食 食堂",
-            "居酒屋・深夜食堂": "居酒屋 深夜営業 居酒屋",
-            "焼肉・肉料理": "焼肉 肉料理 ステーキ",
+            "ラーメン": "ラーメン",
+            "ハンバーガー": "ハンバーガー",
+            "レストラン・洋食": "洋食 レストラン",
+            "和食・定食": "定食 和食",
+            "居酒屋・深夜食堂": "居酒屋",
+            "焼肉・肉料理": "焼肉 ステーキ",
         }
     },
     "スイーツ": {
         "ジャンル": {
-            "アイス・ジェラート": "アイスクリーム ジェラート パフェ",
-            "クレープ": "クレープ ガレット",
-            "アサイーボウル": "アサイーボウル スムージー",
-            "ケーキ・パフェ": "ケーキ パフェ 喫茶店",
+            "アイス・ジェラート": "アイスクリーム ジェラート",
+            "クレープ": "クレープ",
+            "アサイーボウル": "アサイーボウル",
+            "ケーキ・パフェ": "ケーキ パフェ",
             "パン・パン屋": "パン屋 ベーカリー",
         }
     },
     "景色・観光": {
         "ジャンル": {
-            "夜景・展望台": "夜景 展望台 展望デッキ",
-            "海・ドライブコース": "海 沿岸 ドライブコース 砂浜",
-            "山・自然・公園": "山 自然 公園 渓谷",
-            "道の駅・ドライブイン": "道の駅 ドライブイン",
+            "夜景・展望台": "夜景 展望台",
+            "海・ドライブコース": "海 ドライブコース",
+            "山・自然・公園": "公園 自然",
+            "道の駅・ドライブイン": "道の駅",
         }
     }
 }
@@ -155,7 +155,7 @@ def get_trending_by_shares(limit=10):
 def expand_free_word_with_ai(free_word):
     if not client or not free_word.strip():
         return free_word
-    prompt = f"ドライブの目的地を探す検索キーワード「{free_word}」に関連する、具体的な店舗ジャンルや特徴をスペース区切りで5つ出力してください。"
+    prompt = f"ドライブの目的地を探す検索キーワード「{free_word}」に関連する、具体的な店舗ジャンルや特徴をスペース区切りで3つ程度出力してください。"
     try:
         response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
         expanded = response.text.strip()
@@ -198,7 +198,6 @@ def get_routes_matrix(origin_str, destinations):
             dest_strs.append(d.get("address", d.get("name")))
             
     results = {}
-    # Distance Matrix APIの1回あたりリクエスト上限（25件）を考慮し分割処理
     chunk_size = 25
     for i in range(0, len(dest_strs), chunk_size):
         chunk = dest_strs[i:i + chunk_size]
@@ -244,28 +243,18 @@ def check_open_at_time_details(regular_opening_hours, open_now_fallback, arrival
             close_dt = datetime.datetime.combine(arrival_dt.date(), close_time_obj, tzinfo=arrival_dt.tzinfo)
             lo_dt = close_dt - datetime.timedelta(minutes=30)
             
-            # 到着時刻がラストオーダー目安を過ぎていないかも判定
-            if arrival_dt > lo_dt and (close_minutes - arrival_minutes) < 30:
-                return False, f"{c_hour:02d}:{c_min:02d}", "LO終了"
+            lo_str = lo_dt.strftime("%H:%M") + " 頃"
+            if arrival_dt > lo_dt:
+                lo_str += " ⚠️LO通過・お急ぎください"
                 
-            return True, f"{c_hour:02d}:{c_min:02d}", lo_dt.strftime("%H:%M") + " 頃 (目安)"
+            return True, f"{c_hour:02d}:{c_min:02d}", lo_str
             
     return False, "営業時間外", "営業時間外"
 
 # ------------------------------------------------------------
-# Google Places API (Text Search) 全件全取得 (最大60件)
+# 1クエリ用テキスト検索ヘルパー
 # ------------------------------------------------------------
-def search_places_text_all(location_str, radius_km, search_query_keyword):
-    if not GOOGLE_MAPS_API_KEY:
-        st.error("GOOGLE_MAPS_API_KEY が未設定です。")
-        return []
-        
-    lat, lng = geocode_location(location_str)
-    st.info(f"🔎 1. 座標確認: lat={lat}, lng={lng}")
-    if lat is None or lng is None:
-        st.error("現在地の取得に失敗しました。")
-        return []
-
+def _fetch_places_single_query(lat, lng, radius_km, query):
     url = "https://places.googleapis.com/v1/places:searchText"
     headers = {
         "Content-Type": "application/json",
@@ -274,12 +263,11 @@ def search_places_text_all(location_str, radius_km, search_query_keyword):
             "places.id,places.displayName,places.formattedAddress,places.rating,"
             "places.userRatingCount,places.regularOpeningHours,"
             "places.currentOpeningHours.openNow,places.googleMapsUri,"
-            "places.location,places.photos,places.reviews,places.types,nextPageToken"
+            "places.location,places.photos,places.reviews,places.types"
         ),
     }
-    
     body = {
-        "textQuery": search_query_keyword,
+        "textQuery": query,
         "maxResultCount": 20,
         "locationBias": {
             "circle": {
@@ -288,77 +276,80 @@ def search_places_text_all(location_str, radius_km, search_query_keyword):
             }
         }
     }
-    
-    st.info(f"🔎 2. リクエスト送信中... クエリ: 「{search_query_keyword}」 / 半径: {radius_km}km")
-
     try:
         r = requests.post(url, headers=headers, json=body, timeout=10)
-        st.info(f"🔎 3. APIレスポンスステータス: {r.status_code}")
-        
-        if r.status_code != 200:
-            st.error(f"APIエラー詳細: {r.text}")
-            return []
-            
-        res_data = r.json()
-        raw_places = res_data.get("places", [])
-        st.info(f"🔎 4. API取得成功件数（生の取得数）: {len(raw_places)}件")
-        
-        # 取得できた店名をいくつか表示してみる
-        if raw_places:
-            sample_names = [p.get("displayName", {}).get("text", "") for p in raw_places[:3]]
-            st.write(f"取得サンプル: {sample_names}")
-            
-    except Exception as e:
-        st.error(f"通信例外が発生しました: {e}")
-        return []
+        if r.status_code == 200:
+            return r.json().get("places", [])
+    except Exception:
+        pass
+    return []
 
-    # 以下フィルタリング処理...
+# ------------------------------------------------------------
+# Google Places API OR検索（複数単語の論理和 A ∨ B ∨ C）
+# ------------------------------------------------------------
+def search_places_or_conditions(location_str, radius_km, keywords_list):
+    if not GOOGLE_MAPS_API_KEY: return []
+    lat, lng = geocode_location(location_str)
+    if lat is None or lng is None: return []
+
     unwanted_name_keywords = ["ホテル", "hotel", "旅館", "宿", "シネマ", "cinema", "映画館", "マクドナルド", "すき家", "吉野家"]
     
-    places = []
     seen_ids = set()
-    for p in raw_places:
-        pid = p.get("id")
-        if not pid or pid in seen_ids: continue
-        seen_ids.add(pid)
+    places = []
 
-        name_check = p.get("displayName", {}).get("text", "")
-        if any(x in name_check.lower() for x in unwanted_name_keywords): continue
-
-        review_texts = [rev.get("text", {}).get("text", "").replace("\n", " ") for rev in p.get("reviews", [])[:5] if rev.get("text", {}).get("text")]
+    # リストにあるキーワードごとに個別API検索（OR検索を実現）
+    for kw in keywords_list:
+        if not kw.strip(): continue
+        raw_places = _fetch_places_single_query(lat, lng, radius_km, kw.strip())
         
-        places.append({
-            "google_id": pid,
-            "name": name_check,
-            "address": p.get("formattedAddress", ""),
-            "rating": float(p.get("rating", 0)),
-            "review_count": int(p.get("userRatingCount", 0)),
-            "maps_url": p.get("googleMapsUri", ""),
-            "regular_opening_hours": p.get("regularOpeningHours"),
-            "open_now_fallback": p.get("currentOpeningHours", {}).get("openNow"),
-            "location": p.get("location"),
-            "photo_urls": [],
-            "review_texts": " / ".join(review_texts)
-        })
+        for p in raw_places:
+            pid = p.get("id")
+            if not pid or pid in seen_ids: continue
+            
+            name_check = p.get("displayName", {}).get("text", "")
+            if any(x in name_check.lower() for x in unwanted_name_keywords): continue
+
+            seen_ids.add(pid)
+            photo_urls = []
+            for photo in p.get("photos", [])[:2]:
+                photo_name = photo.get("name")
+                if photo_name:
+                    photo_urls.append(f"https://places.googleapis.com/v1/{photo_name}/media?key={GOOGLE_MAPS_API_KEY}&maxHeightPx=400&maxWidthPx=400")
+
+            review_texts = [rev.get("text", {}).get("text", "").replace("\n", " ") for rev in p.get("reviews", [])[:5] if rev.get("text", {}).get("text")]
+            
+            places.append({
+                "google_id": pid,
+                "name": name_check,
+                "address": p.get("formattedAddress", ""),
+                "rating": float(p.get("rating", 0)),
+                "review_count": int(p.get("userRatingCount", 0)),
+                "maps_url": p.get("googleMapsUri", ""),
+                "regular_opening_hours": p.get("regularOpeningHours"),
+                "open_now_fallback": p.get("currentOpeningHours", {}).get("openNow"),
+                "location": p.get("location"),
+                "photo_urls": photo_urls,
+                "review_texts": " / ".join(review_texts)
+            })
+            
     return places
 
 # ------------------------------------------------------------
-# メイン処理 (全件取得 -> 時間判定 -> 評価順ソート -> Gemini)
+# メイン処理 (OR検索全件取得 -> 時間判定 -> 評価順ソート -> Gemini)
 # ------------------------------------------------------------
-def run_search(location_str, radius_km, search_query_keyword, budget_filter, min_rating):
+def run_search(location_str, radius_km, keywords_list, budget_filter, min_rating):
     if not client:
         st.error("GEMINI_API_KEY が未設定です。")
         return []
 
-    # 1. 現在時刻の取得
     now = datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
     
-    # 2. 圏内から全対象店舗を取得（20件制限の撤廃）
-    raw_places = search_places_text_all(location_str, radius_km, search_query_keyword)
-    st.caption(f"エリア内ヒット件数: {len(raw_places)} 件")
+    # 1. OR検索（A ∨ B ∨ C）で全候補を取得
+    raw_places = search_places_or_conditions(location_str, radius_km, keywords_list)
+    st.caption(f"OR条件で検索・ヒットした統合店舗数: {len(raw_places)} 件")
     if not raw_places: return []
 
-    # 3. ルート車移動時間の計算とラストオーダー・営業中の厳密判定
+    # 2. ルート移動時間計算 ＆ 営業中判定
     durations_map = get_routes_matrix(location_str, raw_places)
     open_places = []
     
@@ -377,18 +368,18 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
             p["drive_time_min"] = math.ceil(drive_seconds / 60)
             p["closing_time_str"] = closing_time_str
             p["last_order_str"] = last_order_str
-            # スコアリング（評価 + 口コミ数の確からしさ）
+            # スコアリング（評価 ＋ 口コミ数の対数）
             p["score"] = p["rating"] + math.log10(max(p["review_count"], 1))
             open_places.append(p)
 
     st.caption(f"営業中かつ条件合致件数: {len(open_places)} 件")
     if not open_places: return []
 
-    # 4. 評価の高い順（スコア順）にソートしてトップ10を厳選
+    # 3. 統合された全候補の中から評価スコア順に並べてトップ10を選出
     open_places.sort(key=lambda x: x["score"], reverse=True)
     top_10_places = open_places[:10]
 
-    # 5. Gemini API を使用して、トップ10店舗の口コミからメニューと魅力を抽出
+    # 4. トップ10店舗についてGemini APIで口コミからメニュー・魅力抽出
     input_list_for_gemini = [
         {"google_id": p["google_id"], "name": p["name"], "reviews": p["review_texts"] if p["review_texts"] else "特になし"}
         for p in top_10_places
@@ -430,7 +421,6 @@ def run_search(location_str, radius_km, search_query_keyword, budget_filter, min
     except Exception:
         pass
 
-    # ベースデータとGeminiの抽出結果をマージ
     candidates = []
     for p in top_10_places:
         g_data = gemini_map.get(p["google_id"], {})
@@ -505,7 +495,7 @@ def main():
         free_word = st.text_input("こだわりキーワード (任意)", placeholder="例: 隠れ家, 夜カフェ, 激辛")
 
         st.header("④ 条件")
-        min_rating = st.slider("最低評価", 1.0, 5.0, 3.5, 0.1)
+        min_rating = st.slider("最低評価", 1.0, 5.0, 3.0, 0.1)
         budget_filter = st.select_slider("予算感", options=["指定なし", "〜1000円", "1000〜3000円", "3000円〜"])
 
         search_clicked = st.button("🔍 検索する", type="primary", use_container_width=True)
@@ -517,18 +507,23 @@ def main():
             if not location_str:
                 st.error("現在地を指定してください。")
             else:
-                with st.spinner("圏内のスポットを検索＆ルート計算中..."):
-                    keyword_parts = []
-                    if selected_keywords:
-                        keyword_parts.append(selected_keywords[0].split()[0])
-                    if free_word.strip():
-                        keyword_parts.append(expand_free_word_with_ai(free_word.strip()))
+                with st.spinner("圏内のスポットをOR検索＆ルート計算中..."):
+                    search_keywords_list = []
                     
-                    combined_keywords = " ".join(keyword_parts).strip()
-                    if not combined_keywords:
-                        combined_keywords = "ドライブ スポット グルメ"
+                    # 1. チェックされたジャンルキーワードをリストに追加（OR条件要素）
+                    if selected_keywords:
+                        search_keywords_list.extend(selected_keywords)
 
-                    results = run_search(location_str, radius_km, combined_keywords, budget_filter, min_rating)
+                    # 2. フリーワードがあればAI拡張して検索リストに追加
+                    if free_word.strip():
+                        expanded = expand_free_word_with_ai(free_word.strip())
+                        search_keywords_list.append(expanded)
+                    
+                    # 何も選択されていない場合はデフォルトキーワード
+                    if not search_keywords_list:
+                        search_keywords_list = ["グルメ レストラン ドライブスポット"]
+
+                    results = run_search(location_str, radius_km, search_keywords_list, budget_filter, min_rating)
 
                 if not results:
                     st.info("条件に合う営業中のスポットが見つかりませんでした。目的を変更するか最低評価を下げる・範囲を広げて再試行してください。")

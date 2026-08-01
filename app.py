@@ -6,7 +6,7 @@ For Spontaneous Drivers 🚗
 1. 現在地と現在時刻を取得
 2. 選択されたジャンルごとにOR検索を行い、エリア内の候補を重複排除して統合
 3. Google Distance Matrix API で車移動時間・到着予定時刻を計算し営業判定
-4. 全候補の中から評価（Rating + log10口コミ数）順にランキング化（全件表示）
+4. 全候補の中から評価（Rating + log10口コミ数）順にソート（10件ずつのページネーション表示）
 5. Gemini API で候補店舗の口コミから「20文字の要約魅力」と「確実な一番人気メニュー1品」を抽出
 6. 写真（最大3枚）、各種案内（ナビ・インスタ・シェア）を提供する。
 """
@@ -77,13 +77,14 @@ RANGE_OPTIONS = {
     "手動入力": None,
 }
 
+PAGE_SIZE = 10  # 1ページあたりの表示件数
+
 # ------------------------------------------------------------
 # ヘルパー関数: 住所から「日本、」を取り除く
 # ------------------------------------------------------------
 def clean_address(address_str):
     if not address_str:
         return ""
-    # 先頭の「日本、」「日本 」「〒XXX-XXXX 日本、」などを除去
     cleaned = re.sub(r"^(〒?\d{3}-\d{4}\s*)?日本[、,\s]*", "", address_str)
     return cleaned
 
@@ -357,7 +358,7 @@ def search_places_or_conditions(location_str, radius_km, keywords_list):
             places.append({
                 "google_id": pid,
                 "name": name_check,
-                "address": clean_address(p.get("formattedAddress", "")), # ⭐ 住所クリーニング適用
+                "address": clean_address(p.get("formattedAddress", "")),
                 "rating": float(p.get("rating", 0)),
                 "review_count": int(p.get("userRatingCount", 0)),
                 "maps_url": p.get("googleMapsUri", ""),
@@ -408,10 +409,7 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
     st.caption(f"営業中かつ条件合致件数: {len(open_places)} 件")
     if not open_places: return []
 
-    # スコア（評価＋口コミ数補正）が高い順に全件ソート
     open_places.sort(key=lambda x: x["score"], reverse=True)
-    
-    # ⭐ 全件表示対象に変更
     all_ranked_places = open_places
 
     input_list_for_gemini = [
@@ -610,43 +608,77 @@ def main():
                     if not search_keywords_list:
                         search_keywords_list = ["グルメ ドライブスポット"]
 
-                    results = run_search(location_str, radius_km, search_keywords_list, min_rating)
+                    # 検索実行結果をセッションに保持
+                    st.session_state["search_results"] = run_search(location_str, radius_km, search_keywords_list, min_rating)
+                    st.session_state["current_page"] = 1 # ページを1にリセット
 
-                if not results:
-                    st.info("条件に合う営業中のスポットが見つかりませんでした。目的を変更するか最低評価を下げる・範囲を広げて再試行してください。")
+        # 検索結果の表示制御
+        results = st.session_state.get("search_results", [])
+        
+        if results:
+            total_items = len(results)
+            total_pages = math.ceil(total_items / PAGE_SIZE)
+            current_page = st.session_state.get("current_page", 1)
 
-                for rank, r in enumerate(results, start=1):
-                    with st.container(border=True):
-                        cols = st.columns([3, 1])
-                        with cols[0]:
-                            st.subheader(f"{rank}位：{r['name']}")
-                            
-                            # 写真最大3枚表示
-                            if r.get("photo_urls"):
-                                img_cols = st.columns(min(len(r["photo_urls"]), 3))
-                                for i, img_url in enumerate(r["photo_urls"][:3]):
-                                    with img_cols[i]: st.image(img_url, use_container_width=True)
+            # ページの範囲切り出し
+            start_idx = (current_page - 1) * PAGE_SIZE
+            end_idx = start_idx + PAGE_SIZE
+            page_items = results[start_idx:end_idx]
 
-                            # 20文字以内の魅力要約
-                            if r.get("buzz_reason"):
-                                st.info(f"💡 {r['buzz_reason']}")
+            # 該当ページアイテムの表示（順位表記なし）
+            for r in page_items:
+                with st.container(border=True):
+                    cols = st.columns([3, 1])
+                    with cols[0]:
+                        st.subheader(r['name']) # ⭐ 順位表記を削除（店舗名のみ）
+                        
+                        if r.get("photo_urls"):
+                            img_cols = st.columns(min(len(r["photo_urls"]), 3))
+                            for i, img_url in enumerate(r["photo_urls"][:3]):
+                                with img_cols[i]: st.image(img_url, use_container_width=True)
 
-                            # 確実な一番人気メニュー1品
-                            if r.get("popular_menu"):
-                                st.write(f"👑 **一番人気**: {r['popular_menu']}")
+                        if r.get("buzz_reason"):
+                            st.info(f"💡 {r['buzz_reason']}")
 
-                            st.write(f"📍 住所: {r['address']}")
-                            st.write(f"⭐ 評価: {r['rating']} ({r['review_count']}件)")
-                            st.write(f"🚗 所要時間目安: 約 {r['drive_time_min']} 分 (到着予定: {r['arrival_dt'].strftime('%H:%M')})")
-                            st.write(f"⏳ 閉店時間: **{r['closing_time_str']}**（LO: **{r['last_order_str']}**）")
+                        if r.get("popular_menu"):
+                            st.write(f"👑 **一番人気**: {r['popular_menu']}")
 
-                        with cols[1]:
-                            st.link_button("🗺️ ナビ開始", r["maps_url"], use_container_width=True)
-                            insta_url = f"[https://www.instagram.com/explore/search/keyword/?q=](https://www.instagram.com/explore/search/keyword/?q=){urllib.parse.quote(r['name'])}"
-                            st.link_button("📸 インスタで探す", insta_url, use_container_width=True)
-                            if st.button("📤 シェア", key=f"share_{r['place_id']}", use_container_width=True):
-                                log_share(r["place_id"], r["name"])
-                                st.success("シェアを記録しました!")
+                        st.write(f"📍 住所: {r['address']}")
+                        st.write(f"⭐ 評価: {r['rating']} ({r['review_count']}件)")
+                        st.write(f"🚗 所要時間目安: 約 {r['drive_time_min']} 分 (到着予定: {r['arrival_dt'].strftime('%H:%M')})")
+                        st.write(f"⏳ 閉店時間: **{r['closing_time_str']}**（LO: **{r['last_order_str']}**）")
+
+                    with cols[1]:
+                        st.link_button("🗺️ ナビ開始", r["maps_url"], use_container_width=True)
+                        insta_url = f"[https://www.instagram.com/explore/search/keyword/?q=](https://www.instagram.com/explore/search/keyword/?q=){urllib.parse.quote(r['name'])}"
+                        st.link_button("📸 インスタで探す", insta_url, use_container_width=True)
+                        if st.button("📤 シェア", key=f"share_{r['place_id']}", use_container_width=True):
+                            log_share(r["place_id"], r["name"])
+                            st.success("シェアを記録しました!")
+
+            # ------------------------------------------------------------
+            # ページネーション（10件ずつの切り替えボタン）
+            # ------------------------------------------------------------
+            if total_pages > 1:
+                st.divider()
+                p_col1, p_col2, p_col3 = st.columns([1, 2, 1])
+                
+                with p_col1:
+                    if current_page > 1:
+                        if st.button("◀ 前の10件", use_container_width=True):
+                            st.session_state["current_page"] -= 1
+                            st.rerun()
+
+                with p_col2:
+                    st.markdown(f"<div style='text-align: center; font-weight: bold; margin-top: 5px;'>"
+                                f"{current_page} / {total_pages} ページ （全 {total_items} 件）"
+                                f"</div>", unsafe_allow_html=True)
+
+                with p_col3:
+                    if current_page < total_pages:
+                        if st.button("次の10件 ▶", use_container_width=True):
+                            st.session_state["current_page"] += 1
+                            st.rerun()
 
     with tab2:
         st.subheader("アプリ内で人気のスポット(シェア数ランキング)")

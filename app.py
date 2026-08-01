@@ -506,8 +506,8 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.title("For Spontaneous Drivers 🚗")
-    st.caption("思いつきのドライブに。現在地と目的から、今すぐ行ける最高のスポットを提案します。")
+    st.title("目的地コンサルタント")
+    st.caption("今の気分で選ぶだけ。今から行ける『とっておき』を提案します。")
 
     if not GEMINI_API_KEY or not GOOGLE_MAPS_API_KEY:
         st.warning("APIキーが未設定です。`Secrets` に `GEMINI_API_KEY` および `GOOGLE_MAPS_API_KEY` を設定してください。")

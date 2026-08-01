@@ -7,7 +7,7 @@
 2. 選択されたジャンルごとにOR検索（個別リクエスト）を行い、エリア内の全候補を重複排除して統合
 3. Google Distance Matrix API で車移動時間・到着予定時刻を計算し営業判定
 4. 全候補の中から評価（Rating + 口コミ数）順にランキング化し、トップ10を選出
-5. Gemini API でトップ10店舗の口コミから代表メニュー3選と魅力を自動抽出
+5. Gemini API でトップ10店舗の口コミから「おすすめの客層・理由」と「具体的なメニュー3選」を抽出
 6. ナビ案内、インスタ検索、シェア機能を提供する。
 """
 
@@ -297,7 +297,6 @@ def search_places_or_conditions(location_str, radius_km, keywords_list):
     seen_ids = set()
     places = []
 
-    # リストにあるキーワードごとに個別API検索（OR検索を実現）
     for kw in keywords_list:
         if not kw.strip(): continue
         raw_places = _fetch_places_single_query(lat, lng, radius_km, kw.strip())
@@ -337,7 +336,7 @@ def search_places_or_conditions(location_str, radius_km, keywords_list):
 # ------------------------------------------------------------
 # メイン処理 (OR検索全件取得 -> 時間判定 -> 評価順ソート -> Gemini)
 # ------------------------------------------------------------
-def run_search(location_str, radius_km, keywords_list, budget_filter, min_rating):
+def run_search(location_str, radius_km, keywords_list, min_rating):
     if not client:
         st.error("GEMINI_API_KEY が未設定です。")
         return []
@@ -368,18 +367,17 @@ def run_search(location_str, radius_km, keywords_list, budget_filter, min_rating
             p["drive_time_min"] = math.ceil(drive_seconds / 60)
             p["closing_time_str"] = closing_time_str
             p["last_order_str"] = last_order_str
-            # スコアリング（評価 ＋ 口コミ数の対数）
             p["score"] = p["rating"] + math.log10(max(p["review_count"], 1))
             open_places.append(p)
 
     st.caption(f"営業中かつ条件合致件数: {len(open_places)} 件")
     if not open_places: return []
 
-    # 3. 統合された全候補の中から評価スコア順に並べてトップ10を選出
+    # 3. 評価スコア順に並べてトップ10を選出
     open_places.sort(key=lambda x: x["score"], reverse=True)
     top_10_places = open_places[:10]
 
-    # 4. トップ10店舗についてGemini APIで口コミからメニュー・魅力抽出
+    # 4. Gemini API に口コミを渡し、「どんな人向けか/何が人気か」と「具体的なメニュー3選」を抽出
     input_list_for_gemini = [
         {"google_id": p["google_id"], "name": p["name"], "reviews": p["review_texts"] if p["review_texts"] else "特になし"}
         for p in top_10_places
@@ -389,22 +387,19 @@ def run_search(location_str, radius_km, keywords_list, budget_filter, min_rating
     あなたはドライブの目的地提案アシスタントです。
     以下の【店舗リスト（口コミデータ付き）】の各店舗について、代表メニューと魅力を抽出し、JSONフォーマットで出力してください。
 
-    【予算感の指定】: {budget_filter}
     【店舗リスト】
     {json.dumps(input_list_for_gemini, ensure_ascii=False)}
 
     【出力ルール】
     - リスト内のすべての店舗（google_id）に対してデータを作成してください。
-    - 「reviews (口コミ)」や店名から、代表的な人気メニュー3選（価格目安もわかれば併記）を「popular_menu」の配列として作成。
-    - 予算感の指定と口コミを元に、予算目安（例: 1000〜2000円）を作成。
-    - ドライブで訪れるべき魅力を簡潔な「buzz_reason」として作成。
+    - 「popular_menu」: 口コミから具体的なメニュー名（価格が推測・記載されていれば併記し、どんなメニューかの簡単な説明も添えて）を3つ抽出してください。口コミに具体的な記載がない場合は、店舗名やジャンルから「最も定番で頼むべきメニュー」を具体的に想像して3つ書いてください。空配列は禁止です。
+    - 「buzz_reason」: 口コミや店舗情報をもとに、「どんな人におすすめか」「どんな商品や体験が人気なのか」がはっきりと伝わるように、1文で魅力的に要約してください。
     - 以下のJSON配列フォーマットのみを出力してください（Markdown表記は不要）。
     [
       {{
         "google_id": "入力されたgoogle_id",
-        "budget_name": "1000〜2000円",
-        "popular_menu": ["人気ラーメン (850円)", "特製餃子 (450円)", "チャーシュー丼 (350円)"],
-        "buzz_reason": "深夜まで大人気の行列ができるお店です！"
+        "popular_menu": ["濃厚とんこつラーメン (約850円) - 濃厚なスープが特徴", "手作り餃子 (約400円) - 肉汁たっぷり", "チャーシュー丼 (約350円)"],
+        "buzz_reason": "こってり系が好きな学生や、深夜にガッツリ食べたい方に大人気のラーメン店です！"
       }}
     ]
     """
@@ -416,7 +411,13 @@ def run_search(location_str, radius_km, keywords_list, budget_filter, min_rating
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        gemini_results = json.loads(response.text)
+        gemini_text = response.text.strip()
+        # 万が一Markdown記法が混ざった場合の安全処理
+        if gemini_text.startswith("```json"): gemini_text = gemini_text[7:]
+        if gemini_text.startswith("```"): gemini_text = gemini_text[3:]
+        if gemini_text.endswith("```"): gemini_text = gemini_text[:-3]
+        
+        gemini_results = json.loads(gemini_text.strip())
         gemini_map = {item["google_id"]: item for item in gemini_results if "google_id" in item}
     except Exception:
         pass
@@ -433,16 +434,15 @@ def run_search(location_str, radius_km, keywords_list, budget_filter, min_rating
             "rating": p["rating"],
             "review_count": p["review_count"],
             "buzz_rate": get_buzz_rate(place_id, p["review_count"]),
-            "budget_name": g_data.get("budget_name", "予算目安不明"),
             "arrival_dt": p["arrival_dt"],
             "drive_time_min": p["drive_time_min"],
             "closing_time_str": p["closing_time_str"],
             "last_order_str": p["last_order_str"],
             "address": p["address"],
             "maps_url": p["maps_url"],
-            "buzz_reason": g_data.get("buzz_reason", "話題の注目スポットです！"),
+            "buzz_reason": g_data.get("buzz_reason", "ドライブにおすすめの素敵なスポットです！"),
             "photo_urls": p["photo_urls"],
-            "popular_menu": g_data.get("popular_menu", ["定番おすすめメニュー", "人気商品"]),
+            "popular_menu": g_data.get("popular_menu", ["おすすめの定番メニュー", "人気の一品", "こだわりの商品"]),
         })
 
     return candidates
@@ -496,7 +496,7 @@ def main():
 
         st.header("④ 条件")
         min_rating = st.slider("最低評価", 1.0, 5.0, 3.0, 0.1)
-        budget_filter = st.select_slider("予算感", options=["指定なし", "〜1000円", "1000〜3000円", "3000円〜"])
+        # ※予算目安スライダーはご要望により削除しました
 
         search_clicked = st.button("🔍 検索する", type="primary", use_container_width=True)
 
@@ -510,20 +510,17 @@ def main():
                 with st.spinner("圏内のスポットをOR検索＆ルート計算中..."):
                     search_keywords_list = []
                     
-                    # 1. チェックされたジャンルキーワードをリストに追加（OR条件要素）
                     if selected_keywords:
                         search_keywords_list.extend(selected_keywords)
 
-                    # 2. フリーワードがあればAI拡張して検索リストに追加
                     if free_word.strip():
                         expanded = expand_free_word_with_ai(free_word.strip())
                         search_keywords_list.append(expanded)
                     
-                    # 何も選択されていない場合はデフォルトキーワード
                     if not search_keywords_list:
-                        search_keywords_list = ["グルメ レストラン ドライブスポット"]
+                        search_keywords_list = ["グルメ ドライブスポット"]
 
-                    results = run_search(location_str, radius_km, search_keywords_list, budget_filter, min_rating)
+                    results = run_search(location_str, radius_km, search_keywords_list, min_rating)
 
                 if not results:
                     st.info("条件に合う営業中のスポットが見つかりませんでした。目的を変更するか最低評価を下げる・範囲を広げて再試行してください。")
@@ -539,19 +536,21 @@ def main():
                                 for i, img_url in enumerate(r["photo_urls"][:2]):
                                     with img_cols[i]: st.image(img_url, use_container_width=True)
 
+                            # 抽出した「おすすめの理由（どんな人に・何が人気か）」を強調して表示
+                            st.info(f"💡 {r['buzz_reason']}")
+
                             st.write("🍽️ **おすすめ・人気メニュー**")
-                            for item in r["popular_menu"]: st.write(f"- {item}")
+                            for item in r["popular_menu"]: 
+                                st.write(f"- {item}")
 
                             st.write(f"📍 {r['address']}")
                             st.write(f"⭐ 評価: {r['rating']} ({r['review_count']}件)")
-                            st.write(f"💰 予算目安: {r['budget_name']}")
                             st.write(f"🚗 所要時間目安: 約 {r['drive_time_min']} 分 (到着予定: {r['arrival_dt'].strftime('%H:%M')})")
                             st.write(f"⏳ 閉店時間: **{r['closing_time_str']}**（LO: **{r['last_order_str']}**）")
-                            st.caption(f"💬 {r['buzz_reason']}")
 
                         with cols[1]:
                             st.link_button("🗺️ ナビ開始", r["maps_url"], use_container_width=True)
-                            insta_url = f"https://www.instagram.com/explore/search/keyword/?q={urllib.parse.quote(r['name'])}"
+                            insta_url = f"[https://www.instagram.com/explore/search/keyword/?q=](https://www.instagram.com/explore/search/keyword/?q=){urllib.parse.quote(r['name'])}"
                             st.link_button("📸 インスタで探す", insta_url, use_container_width=True)
                             if st.button("📤 シェア", key=f"share_{r['place_id']}", use_container_width=True):
                                 log_share(r["place_id"], r["name"])

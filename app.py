@@ -392,7 +392,7 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
     top_10_places = open_places[:10]
 
     input_list_for_gemini = [
-        {"google_id": p["google_id"], "name": p["name"], "reviews": p["review_texts"] if p["review_texts"] else "特になし"}
+        {"google_id": p["google_id"], "name": p["name"], "reviews": p["review_texts"] if p["review_texts"] else "特に入し"}
         for p in top_10_places
     ]
 
@@ -405,17 +405,17 @@ def run_search(location_str, radius_km, keywords_list, min_rating):
 
     【絶対厳守の抽出ルール】
     1. 「buzz_reason」: 
-       - 口コミ内で多くの人が褒めている内容から、「何がどう人気なのか」を【20文字程度（必ず25文字以内）】の1文で要約してください。
+       - 口口コミ内で多くの人が褒めている内容から、「何がどう人気なのか」を【20文字程度（必ず25文字以内）】の1文で要約してください。
        - 外部知識や一般的な推測は一切禁止し、提供された口コミ本文に書かれている事実のみに基づいて記述してください。
        - 定型文（例: おすすめスポットです）は絶対に禁止します。
 
     2. 「popular_menu」:
        - 口コミ内で「一番人気」「美味しい」「絶対頼むべき」と明確に言及されている商品名を【1つだけ】抽出してください。
        - 価格（値段）が口コミ内に数字として明記されている場合のみ「商品名 (○○円)」の形式で書いてください。
-       - 口コミから商品名が確認できない、あるいは不確実な場合は絶対にでっち上げず、空文字 "" にしてください。
+       - 口口コミから商品名が確認できない、あるいは不確実な場合は絶対にでっち上げず、空文字 "" にしてください。
 
     3. 「ファクトチェック（嘘の禁止）」:
-       - 口コミ本文に直接的な根拠がない情報は一切出力してはいけません。
+       - 口口コミ本文に直接的な根拠がない情報は一切出力してはいけません。
        - 推測や固定観念による補完は禁止します。確実なデータがない場合は空欄（""）にしてください。
 
     【出力フォーマット】
@@ -511,7 +511,7 @@ def main():
         radius_km = st.number_input("圏内(km)を手動入力", min_value=1, max_value=200, value=20) if RANGE_OPTIONS[range_label] is None else RANGE_OPTIONS[range_label]
 
         # ------------------------------------------------------------
-        # ③ 目的（[ ] ご飯 [ > ] のレイアウト）
+        # ③ 目的（枠内に「チェックボックス」と「開くボタン」を格納）
         # ------------------------------------------------------------
         st.header("③ 目的")
         selected_keywords = []
@@ -524,27 +524,29 @@ def main():
             if parent_key not in st.session_state:
                 st.session_state[parent_key] = False
 
-            # チェックボックスと開くボタン（expander）を横並びにする
-            col_check, col_exp = st.columns([1, 4])
+            # 枠（コンテナ）を作成
+            with st.container(border=True):
+                # 枠の中にチェックボックスとアコーディオン（開くボタン）を横並びで配置
+                col_check, col_exp = st.columns([1, 4])
 
-            # チェックボックス（例: [ ] ご飯）
-            parent_checked = col_check.checkbox(category, key=parent_key)
+                # チェックボックス（例: [ ] ご飯）
+                parent_checked = col_check.checkbox(category, key=parent_key)
 
-            # 開くアコーディオン（デフォルトは閉じている）
-            with col_exp.expander(""):
-                for genre_name, genre_keyword in genres.items():
-                    child_key = f"chk_{category}_{genre_name}"
-                    
-                    # 大枠チェックのON/OFFに合わせて一括選択/全解除
-                    if parent_checked and not st.session_state.get(f"prev_{parent_key}", False):
-                        st.session_state[child_key] = True
-                    elif not parent_checked and st.session_state.get(f"prev_{parent_key}", False):
-                        st.session_state[child_key] = False
+                # 開くアコーディオン（タイトルなしで「>」ボタンだけ）
+                with col_exp.expander(""):
+                    for genre_name, genre_keyword in genres.items():
+                        child_key = f"chk_{category}_{genre_name}"
+                        
+                        # 大枠チェックのON/OFFに合わせて一括選択/全解除
+                        if parent_checked and not st.session_state.get(f"prev_{parent_key}", False):
+                            st.session_state[child_key] = True
+                        elif not parent_checked and st.session_state.get(f"prev_{parent_key}", False):
+                            st.session_state[child_key] = False
 
-                    # 個別チェックボックス
-                    is_child_checked = st.checkbox(genre_name, key=child_key)
-                    if is_child_checked:
-                        selected_keywords.append(genre_keyword)
+                        # 個別チェックボックス
+                        is_child_checked = st.checkbox(genre_name, key=child_key)
+                        if is_child_checked:
+                            selected_keywords.append(genre_keyword)
 
             st.session_state[f"prev_{parent_key}"] = parent_checked
 

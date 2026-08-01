@@ -518,7 +518,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.title("🚗行き先コンサルタント🚙")
+    st.title("行き先コンサルタント")
     st.caption("今の気分で選ぶだけ。今からいける「とっておき」を提案します。")
 
     if not GEMINI_API_KEY or not GOOGLE_MAPS_API_KEY:
